@@ -46,7 +46,10 @@ _STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 _SECURITY_HEADERS = (
     ("X-Content-Type-Options", "nosniff"),
     ("X-Frame-Options", "DENY"),
-    ("Referrer-Policy", "no-referrer"),
+    # NOT "no-referrer": that policy makes browsers send `Origin: null` on form navigations
+    # and drop Referer entirely, which breaks the origin check and the form redirect.
+    # "same-origin" keeps our URLs from ever reaching a third party, which is the point.
+    ("Referrer-Policy", "same-origin"),
     # No CDN, no inline handlers: everything the page runs is served from this origin.
     (
         "Content-Security-Policy",

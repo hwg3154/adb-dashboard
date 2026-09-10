@@ -248,8 +248,12 @@ def check_write_headers(app: "object", request: Request, csrf: str = "") -> None
     if not host or not _ORIGIN_RE.match(host):
         raise RequestRejected("bad_request")
 
+    # A browser sends the literal string "null" for an opaque origin, and also for a form
+    # navigation under some referrer policies. It names no origin at all, so treating it as a
+    # mismatch locks out a legitimate page; treat it as absent and let Sec-Fetch-Site decide,
+    # which is the header that can actually distinguish our own page from someone else's.
     origin = request.headers.get("origin", "")
-    if origin:
+    if origin and origin != "null":
         if not _origin_matches(app, origin, host):
             raise RequestRejected("bad_origin")
     else:

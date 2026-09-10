@@ -248,13 +248,50 @@ class Live(_Base):
         self.assertEqual(status, 403)
         self.assertEqual(self.body_json(body)["error"], "bad_origin")
 
-    def test_12c_an_opaque_origin_is_refused(self):
-        # A sandboxed frame serialises its Origin as the string "null". That is the
-        # untrusted case the header exists to name, so it must not be accepted.
+    def test_12c_a_null_origin_falls_back_to_sec_fetch_site(self):
+        """`Origin: null` names no origin, so Sec-Fetch-Site has to settle it.
+
+        Regression: a "no-referrer" Referrer-Policy made real browsers send `Origin: null`
+        on the sign-in form, and refusing it outright made the app impossible to log into.
+        """
         csrf = self.sign_in()
-        status, _, body = self.post_json("/api/key", {"key": "home"}, origin="null", csrf=csrf)
+        # Our own page: allowed.
+        request = urllib.request.Request(
+            self.base + "/api/key",
+            data=json.dumps({"key": "home", "csrf": csrf}).encode("utf-8"),
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Origin": "null",
+                "Sec-Fetch-Site": "same-origin",
+            },
+        )
+        status, _, body = self._open(request)
+        self.assertEqual(status, 409, body)  # reached the handler: no device paired
+
+        # Someone else's page: still refused.
+        request = urllib.request.Request(
+            self.base + "/api/key",
+            data=json.dumps({"key": "home", "csrf": csrf}).encode("utf-8"),
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Origin": "null",
+                "Sec-Fetch-Site": "cross-site",
+            },
+        )
+        status, _, body = self._open(request)
         self.assertEqual(status, 403)
         self.assertEqual(self.body_json(body)["error"], "bad_origin")
+
+    def test_12d_referrer_policy_does_not_null_the_origin(self):
+        """`Referrer-Policy: no-referrer` makes browsers send `Origin: null` on form
+        navigations and drop Referer, which breaks sign-in and the form redirect. Pin it."""
+        _, headers, _ = self.get("/login")
+        policy = headers.get("Referrer-Policy", "")
+        self.assertTrue(policy, "Referrer-Policy is missing")
+        self.assertNotIn("no-referrer", policy)
+        self.assertEqual(policy, "same-origin")
 
     def test_13_an_unknown_endpoint_is_not_found(self):
         csrf = self.sign_in()
