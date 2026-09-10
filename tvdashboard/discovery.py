@@ -65,6 +65,9 @@ class DiscoveredHost:
 
     @property
     def model(self) -> str:
+        """`_PROPS` is (manufacturer, model, abi); the label wants the model, not the vendor."""
+        if len(self.props) >= 2 and self.props[1]:
+            return self.props[1]
         return self.props[0] if self.props else ""
 
     def target(self) -> str:
@@ -97,36 +100,60 @@ def discover(config: Config) -> list[registry.Candidate]:
 # ------------------------------------------------------------------------------- discovery
 
 
-def _local_subnets(config: Config) -> list[tuple[str, int]]:
-    """Learn which hosts to try. The unconnected UDP socket is the trick: it reports the
-    source address the OS would use for the LAN, which tells us the /24 without sending."""
-    endpoints: list[tuple[str, int]] = []
+def _local_subnets(config: Config) -> list[tuple[ipaddress.IPv4Network, int]]:
+    """Learn which /24 to sweep. The unconnected UDP socket is the trick: it reports the
+    source address the OS would use for the LAN, which tells us the network without sending.
+
+    Returns networks, because that is what `_seed_hosts` expands.
+    """
+    endpoints: list[tuple[ipaddress.IPv4Network, int]] = []
+    seed: socket.socket | None = None
     try:
         seed = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         seed.connect((_PROBE_HOST, _PROBE_PORT))
         local = seed.getsockname()[0]
         if isinstance(local, str) and _usable(local, config):
-            endpoints.append((local, 0))
+            endpoints.append((_slash24(local), 0))
     except OSError:
         pass
     finally:
-        seed.close()
+        if seed is not None:
+            seed.close()
 
-    for port in config.device_ports:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        sock.settimeout(max(0.05, config.discover_timeout_seconds))
-        try:
-            sock.sendto(UDP_PROBE, (_BROADCAST_ADDR, port))
+    for host in _broadcast_replies(config):
+        network = _slash24(host)
+        if network is not None and all(network != known for known, _ in endpoints):
+            endpoints.append((network, 0))
+    return [(network, port) for network, port in endpoints if network is not None]
+
+
+def _broadcast_replies(config: Config) -> list[str]:
+    """Ask for a reply on the discovery port. Nothing on a TV is obliged to answer, so this
+    only ever adds a network the routing table did not already reveal."""
+    hosts: list[str] = []
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    sock.settimeout(max(0.05, config.discover_timeout_seconds))
+    try:
+        sock.sendto(UDP_PROBE, (_BROADCAST_ADDR, UDP_DISCOVERY_PORT))
+        while len(hosts) < _MAX_BROADCAST_REPLIES:
             data, addr = sock.recvfrom(256)
             host = addr[0] if isinstance(addr, tuple) and isinstance(addr[0], str) else ""
-            if data and _usable(host, config):
-                endpoints.append((host, port))
-        except OSError:
-            continue
-        finally:
-            sock.close()
-    return endpoints
+            if data and host and _usable(host, config) and host not in hosts:
+                hosts.append(host)
+    except OSError:
+        pass
+    finally:
+        sock.close()
+    return hosts
+
+
+def _slash24(host: str) -> ipaddress.IPv4Network | None:
+    """The /24 a host sits on. Discovery is capped to one /24 by design (§9)."""
+    try:
+        return ipaddress.ip_network(f"{host}/24", strict=False)
+    except (TypeError, ValueError):
+        return None
 
 
 def _seed_hosts(subnets: list[tuple[ipaddress.IPv4Network, int]], config: Config) -> list[tuple[str, int]]:
@@ -138,14 +165,17 @@ def _seed_hosts(subnets: list[tuple[ipaddress.IPv4Network, int]], config: Config
             continue
         base = int(subnet.network_address)
         for offset in range(_HOST_OCTET_MIN + 1, _HOST_OCTET_MAX + 1):
-            if len(hosts) >= config.discover_max_hosts:
+            # The cap counts hosts, not probes: one host contributes one entry per port.
+            if len(seen) >= config.discover_max_hosts:
                 return hosts
             address = ipaddress.IPv4Address(base + offset)
             host = str(address)
             if host in seen or not _usable(host, config):
                 continue
             seen.add(host)
-            hosts.append((host, port or min(config.device_ports)))
+            # design.md §2: the sweep covers every configured device port, not just the first.
+            for candidate_port in ((port,) if port else config.device_ports):
+                hosts.append((host, candidate_port))
     return hosts
 
 
@@ -200,19 +230,35 @@ async def _accepts(host: str, port: int, config: Config) -> bool:
 
 
 async def _read_props(host: str, port: int, config: Config) -> tuple[str, ...]:
-    """Read `ro.product.*` through the adb wrapper, one key per argv."""
+    """Read `ro.product.*` through the adb wrapper, one key per argv.
+
+    A bare TCP connect proves something is listening; only a device that answers for its own
+    properties is a TV. That needs an adb connection first, and it runs off the event loop
+    because the adb wrapper is blocking.
+    """
+    return await asyncio.to_thread(_read_props_blocking, host, port, config)
+
+
+def _read_props_blocking(host: str, port: int, config: Config) -> tuple[str, ...]:
     target = f"{host}:{port}"
     client = adb.AdbClient.from_config(config)
-    values: list[str] = []
-    for key in _PROPS:
-        result = client.run(["-s", target, "shell", "getprop", key])
-        if not result.ok:
-            return ()
-        lines = [line.strip() for line in result.lines() if len(line.strip()) <= _MAX_PROP_CHARS]
-        if not lines:
-            return ()
-        values.append(lines[0])
-    return tuple(values)
+    connected = client.connect(target)
+    if not connected.ok:
+        return ()
+    try:
+        values: list[str] = []
+        for key in _PROPS:
+            result = client.run(["-s", target, "shell", "getprop", key])
+            if not result.ok:
+                return ()
+            lines = [line.strip() for line in result.lines() if len(line.strip()) <= _MAX_PROP_CHARS]
+            if not lines:
+                return ()
+            values.append(lines[0])
+        return tuple(values)
+    finally:
+        # Verification must not leave a connection behind; the wizard connects deliberately.
+        client.disconnect(target)
 
 
 def _usable(host: str, config: Config) -> bool:
@@ -227,3 +273,4 @@ def _usable(host: str, config: Config) -> bool:
 
 
 _MAX_PROP_CHARS = 128
+_MAX_BROADCAST_REPLIES = 8

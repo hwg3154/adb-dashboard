@@ -1,6 +1,6 @@
 :root { --fg:#17202a; --muted:#6b7280; --line:#d6dbe1; --bg:#f7f8fa; --accent:#0b6bcb; --danger:#b3261e; }
 * { box-sizing: border-box; }
-body { margin:0; color:var(--fg); background:var(--bg); font:15px/1.5 system-ui,-apple-system,sans-none,sans-serif; }
+body { margin:0; color:var(--fg); background:var(--bg); font:15px/1.5 system-ui,-apple-system,'Segoe UI',sans-serif; }
 .bar { display:flex; align-items:center; gap:16px; padding:12px 16px; background:#fff; border-bottom:1px solid var(--line); }
 .brand { font-weight:600; text-decoration:none; color:var(--fg); }
 .nav { display:flex; gap:12px; flex:1; }

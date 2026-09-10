@@ -10,6 +10,7 @@ Candidate devices found by discovery are held in a short-lived TTL cache: the br
 from __future__ import annotations
 
 import hashlib
+import secrets
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -231,12 +232,16 @@ class Registry:
     def remember(self, candidates: list[Candidate]) -> int:
         """Store discovery output under opaque ids. Replaces the previous batch."""
         now = time.time()
-        now = time.time()
         stored: dict[str, Candidate] = {}
         for candidate in candidates[:_MAX_LIST_ITEMS]:
             if isinstance(candidate, Candidate) and _valid_id(candidate.id):
                 stored[candidate.id] = candidate
-        self._candidates = {key: value for key, value in stored.items() if now - value.added_at <= self.config.candidate_ttl_seconds}
+        self._candidates = {
+            key: value
+            for key, value in stored.items()
+            if now - value.added_at <= self.config.candidate_ttl_seconds
+        }
+        self._save()
         return len(self._candidates)
 
     def candidates(self) -> list[Candidate]:
@@ -260,6 +265,7 @@ class Registry:
         candidate = self._candidates.pop(key, None)
         if not isinstance(candidate, Candidate):
             return None
+        self._save()
         return candidate
 
     def save(self) -> None:
@@ -278,7 +284,7 @@ class Registry:
 
 def new_device_id() -> str:
     """A fresh opaque device id: random, hex, and meaningful only as a key."""
-    return hashlib.sha256(f"{time.time_ns()}:{id(object())}".encode("utf-8")).hexdigest()[:32]
+    return secrets.token_hex(16)
 
 
 def candidate_key(host: str, port: int) -> str:
@@ -370,6 +376,7 @@ def _candidate_from_storage(candidate_id: object, record: object, now: float, tt
         host=host.strip(),
         port=port,
         score=_to_int(record.get("score"), 0),
+        added_at=added_at,
         model=_clean_text(record.get("model"), MAX_MODEL_CHARS),
     )
 

@@ -36,7 +36,7 @@ per-app settings editor, "Drive TV" hard toggle, env-seeded admin, TLS terminati
 | Auth | First-run wizard, single operator account, no public registration, no password recovery. |
 | Transport | Plain HTTP, LAN-only. Security lives in the application layer, not in TLS. |
 | Discovery | Native `asyncio` TCP sweep + UDP broadcast. No `nmap`. |
-| Dependencies | Runtime deps: none from PyPI required. `argon2-cffi`/`bcrypt` optional, `hashlib.scrypt` fallback. |
+| Dependencies | Runtime deps: none from PyPI required. `argon2-cffi` optional, `hashlib.scrypt` fallback. |
 | Forbidden | `nmap`, `ffmpeg`, `aiohttp`, `requests`, any file-watching loop. |
 
 ## 3. Architecture
@@ -75,7 +75,7 @@ accept loop; state is read from disk on demand and cached with a TTL.
 | Enter (in text context) | `KEYCODE_ENTER` |
 | Back / Home / Menu | `KEYCODE_BACK` / `KEYCODE_HOME` / `KEYCODE_MENU` |
 | Channel up / down | `KEYCODE_CHANNEL_UP` / `KEYCODE_CHANNEL_DOWN` |
-| Guide / Info / Captions / Aspect | `KEYCODE_GUIDE` / `KEYCODE_INFO` / `KEYCODE_CAPTIONS` / `KEYCODE_TV_ASPECT_RATIO` |
+| Guide / Info / Captions / Aspect | `KEYCODE_GUIDE` / `KEYCODE_INFO` / `KEYCODE_CAPTIONS` / `KEYCODE_TV_ZOOM_MODE` |
 | Power / Sleep / Wake | `KEYCODE_POWER` / `KEYCODE_SLEEP` / `KEYCODE_WAKEUP` |
 | Media play / pause / next / prev / seek | `KEYCODE_MEDIA_*` |
 | Volume up / down / mute | `KEYCODE_VOLUME_UP` / `KEYCODE_VOLUME_DOWN` / `KEYCODE_VOLUME_MUTE` |
@@ -154,11 +154,14 @@ Rules for every endpoint:
 
 ## 9. Security requirements
 
-- Argon2id password hashing (`argon2-cffi` when present), `bcrypt` fallback, then `hashlib.scrypt`.
-  Per-user random salt; generic error on bad credentials; no user enumeration, including in timing.
+- Argon2id password hashing (`argon2-cffi` when present), falling back to `hashlib.scrypt`.
+  Per-user random salt; generic error on bad credentials; no user enumeration, including in timing
+  (an unknown username is verified against a decoy hash generated in the same scheme).
 - Server-side sessions: 256-bit random token, stored **hashed**; cookie `HttpOnly` + `SameSite=Lax`,
   path-scoped; idle + absolute expiry; logout revokes. `Secure` only when TLS is terminated in front.
-- Origin / `Sec-Fetch-Site` + `Host` validation on state-changing requests, CSRF token on every form
+- Origin validated against the request's own `Host` (a wildcard listener answers on every LAN
+  address, so a single configured origin cannot be the reference); `Sec-Fetch-Site` refuses
+  `cross-site`; an opaque `Origin: null` is refused. CSRF token on every form
   and every JSON body, `X-Content-Type-Options: nosniff`, no unescaped device strings in HTML.
 - Login rate limiting: per-IP and per-username budget with backoff, plus a global cap.
 - SSRF hygiene: targets must be IPv4 **RFC1918 only**; reject loopback, link-local, multicast,
@@ -169,6 +172,9 @@ Rules for every endpoint:
   is never logged, only its length.
 - Image: `python:3.12-slim`, multi-arch (arm64 + amd64) with Debian `adb`, non-root user, read-only
   rootfs, `no-new-privileges`, dropped capabilities, default seccomp, no `--privileged`.
+- `$HOME/.android` must be writable **and persistent**: adb keeps its RSA key there, and a new
+  key makes the TV demand the wireless-debugging dialog again, which only someone at the TV can
+  accept. A read-only rootfs without that volume breaks `adb connect` outright.
 - No cloud, no telemetry, no CDN assets. All assets are served from the container.
 
 ## 10. Known limitations

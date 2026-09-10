@@ -30,9 +30,9 @@ DEFAULT_ERROR = "bad_request"
 _METHODS = frozenset({"GET", "HEAD", "POST"})
 _UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 #: A missing `Sec-Fetch-Site` is normal for older browsers; a present one must not say the
-#: request was driven by another page. `cross-site` is allowed only because this app is plain
-#: HTTP on a LAN and has no cross-origin pages of its own; the CSRF token is the real check.
-_ALLOWED_SEC_FETCH_SITE = frozenset({"same-origin", "same-site", "none", "cross-site"})
+#: request was driven by another page. `cross-site` was previously accepted here, which made
+#: the check a no-op - the whole point of the header is to name that case.
+_ALLOWED_SEC_FETCH_SITE = frozenset({"same-origin", "same-site", "none"})
 
 _MAX_PATH_CHARS = 128
 _MAX_QUERY_ITEMS = 16
@@ -191,7 +191,7 @@ def read_headers(raw: object) -> dict[str, str]:
         if not isinstance(key, str) or not isinstance(value, str):
             continue
         name = key.strip().lower()[:_MAX_HEADER_NAME_CHARS]
-        if not name or not _SAFE_TOKEN_CHARS.match(name):
+        if not name or not _HEADER_NAME_RE.match(name):
             continue
         out[name] = value.strip()[:_MAX_HEADER_VALUE_CHARS]
     return out
@@ -250,7 +250,7 @@ def check_write_headers(app: "object", request: Request, csrf: str = "") -> None
 
     origin = request.headers.get("origin", "")
     if origin:
-        if not _origin_matches(app, origin):
+        if not _origin_matches(app, origin, host):
             raise RequestRejected("bad_origin")
     else:
         site = request.headers.get("sec-fetch-site", "")
@@ -306,8 +306,14 @@ def _clean_method(value: object) -> str:
 
 
 def _as_mapping(raw: object) -> Mapping[str, str]:
+    """Header names, lower-cased. HTTP header names are case-insensitive and the real server
+    hands them over capitalised ("Cookie"), so a mapping has to be normalised like a list is."""
     if isinstance(raw, Mapping):
-        return raw
+        return {
+            key.strip().lower(): value
+            for key, value in raw.items()
+            if isinstance(key, str) and isinstance(value, str)
+        }
     if isinstance(raw, (list, tuple)):
         out: dict[str, str] = {}
         for item in raw:
@@ -337,21 +343,25 @@ def _parse_form(raw: bytes) -> dict[str, str]:
     return out
 
 
-def _origin_matches(app: "object", origin: str) -> bool:
-    if not _ORIGIN_RE.match(origin.replace("://", "")):
+def _origin_matches(app: "object", origin: str, host: str) -> bool:
+    """An `Origin` is ours when its authority is the `Host` the browser actually used.
+
+    The appliance answers on whatever LAN address the operator typed - a wildcard listener has
+    no single name - so the configured origin cannot be the reference. `Host` is, and a browser
+    sets both consistently while a cross-site page cannot forge either.
+    """
+    scheme, separator, authority = origin.partition("://")
+    if not separator or scheme not in {"http", "https"}:
         return False
-    expected = origin_of(app)
-    if origin == expected:
+    if not _ORIGIN_RE.match(authority):
+        return False
+    if authority == host:
         return True
-    # Requests aimed at the loopback alias of a wildcard listener are still ours.
-    for alias in _LOCAL_ORIGINS:
-        if origin == f"{_scheme(app)}://{alias}:{_listen_port(app)}":
-            return True
-    return expected.endswith(":80") and origin == f"{_scheme(app)}://{origin_of(app).partition('://')[2].split(':')[0]}"
-
-
-def _scheme(app: "object") -> str:
-    return "https" if getattr(app, "config", None) and getattr(app.config, "https", False) else "http"
+    if origin == origin_of(app):
+        return True
+    # A wildcard listener is also reachable on its loopback alias.
+    port = _listen_port(app)
+    return any(authority in {alias, f"{alias}:{port}"} for alias in _LOCAL_ORIGINS)
 
 
 def _listen_port(app: "object") -> int:
@@ -374,6 +384,8 @@ def _safe_code(value: str) -> str:
 
 
 _SAFE_TOKEN_CHARS = re.compile(r"^[a-z][a-z0-9_]*$")
+#: HTTP header names are hyphenated; the token charset above is for query and JSON keys.
+_HEADER_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 _COOKIE_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{1,31}$")
 _LOCAL_ORIGINS = ("localhost", "127.0.0.1")
 

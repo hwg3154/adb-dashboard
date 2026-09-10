@@ -1,0 +1,27 @@
+services:
+  tvdashboard:
+    build: .
+    # design.md §10: on Linux prefer host networking so the LAN sweep and broadcast reach the
+    # TV. On Docker Desktop (macOS/Windows) host mode does not exist; the container is NATted
+    # and discovery is unreliable - use the port mapping below and expect manual entry.
+    network_mode: host
+    # ports: ["8080:8080"]      # use instead of network_mode on Docker Desktop
+    environment:
+      TVD_HTTP_ADDR: "0.0.0.0:8080"
+      # No TLS in front of it, so say so once instead of warning on every page.
+      TVD_ALLOW_INSECURE_HTTP: "1"
+    volumes:
+      - tvd-data:/data                  # accounts, sessions, device registry
+      - tvd-adbkey:/home/tvd/.android   # adb RSA key - losing this re-prompts the TV
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: unless-stopped
+
+volumes:
+  tvd-data:
+  tvd-adbkey:

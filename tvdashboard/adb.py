@@ -29,7 +29,7 @@ _CLASS_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_$]*(?:\.[A-Za-z][A-Za-z0-9_$]*)*$")
 _PACKAGE_FLAGS = ("-3",)
 _PACKAGE_LIST_LIMIT = 80
 _ACTIVITY_LIMIT = 80
-_LAUNCH_CATEGORY = "android.intent.action.MAIN"
+_LAUNCH_ACTION = "android.intent.action.MAIN"
 _LAUNCH_CATEGORIES = (
     "android.intent.category.LEANBACK_LAUNCHER",
     "android.intent.category.LAUNCHER",
@@ -37,21 +37,29 @@ _LAUNCH_CATEGORIES = (
 _PROP_KEY = "ro.product."
 _SCREENCAP_ARGS = ("screencap", "-p")
 
-_OUTPUT_MARKERS = {
-    "error",
-    "failed",
-    "failure",
+#: adb exits 0 even when the device-side command failed, so the output is inspected too.
+#: These are anchored to the start of a line: a package called `com.example.error` or a
+#: `getprop` that legitimately answers `unknown` must not be read as a failure.
+_FAILURE_PREFIXES = (
+    "adb: ",
+    "error:",
+    "error;",
     "exception",
+    "failure ",
+    "failure:",
+    "java.lang.",
+)
+#: Substrings unambiguous enough to match anywhere in a line.
+_FAILURE_SUBSTRINGS = (
     "no activity found",
-    "does not exist",
-    "inaccessible",
-    "unknown",
-    "adb: no",
+    "device not found",
+    "device offline",
+    "device unauthorized",
     "command not found",
     "permission denied",
-    "cannot find",
-    "unable to",
-}
+    "unknown command",
+    "more than one device",
+)
 
 
 class AdbStatus(IntEnum):
@@ -72,6 +80,8 @@ class AdbResult:
     stderr: str
     elapsed_ms: int
     truncated: bool = False
+    #: Undecoded stdout. `stdout` is lossy for binary payloads (screencap), this is not.
+    raw: bytes = b""
 
     @property
     def ok(self) -> bool:
@@ -140,8 +150,12 @@ class AdbClient:
     def available(self) -> bool:
         return shutil.which(self._argv0) is not None
 
-    def run(self, argv: list[str]) -> AdbResult:
-        """Execute a pre-built argv list. This is the single entry point."""
+    def run(self, argv: list[str], *, binary: bool = False) -> AdbResult:
+        """Execute a pre-built argv list. This is the single entry point.
+
+        `binary` suppresses the textual failure heuristic for payloads that are not text
+        (a PNG from `exec-out screencap` will otherwise trip it by coincidence).
+        """
         if not isinstance(argv, list) or not argv or not all(_is_safe_arg(a) for a in argv):
             return AdbResult(AdbStatus.REJECTED, -1, "", "rejected argv", 0)
 
@@ -173,8 +187,9 @@ class AdbClient:
             stderr=(proc.stderr or b"")[: self._max_output // 4].decode("utf-8", "replace"),
             elapsed_ms=_elapsed(started),
             truncated=truncated,
+            raw=payload,
         )
-        if result.ok and _looks_failed(result):
+        if result.ok and not binary and _looks_failed(result):
             return AdbResult(AdbStatus.FAILED, proc.returncode, "", "adb reported a failure", result.elapsed_ms)
         return result
 
@@ -201,8 +216,9 @@ class AdbClient:
     def list_targets(self) -> AdbResult:
         return self.run(["devices"])
 
-    def discover(self) -> AdbResult:
-        return self.run(["discover"])
+    def mdns_services(self) -> AdbResult:
+        """List mDNS-advertised adb endpoints. `adb discover` is not an adb subcommand."""
+        return self.run(["mdns", "services"])
 
     # ------------------------------------------------------------------------------ input
 
@@ -226,13 +242,11 @@ class AdbClient:
 
     def list_apps(self, target: str) -> list[dict[str, str]]:
         """List apps that resolve a `LEANBACK_LAUNCHER` or `LAUNCHER` activity."""
+        target = self.validate_target(target)
         apps: list[dict[str, str]] = []
         seen: set[str] = set()
 
         for category in _LAUNCH_CATEGORIES:
-            listed = self.run(["-s", target, "shell", "pm", "list", "packages", *_PACKAGE_FLAGS])
-            if not listed.ok:
-                continue
             result = self.run(
                 [
                     "-s",
@@ -241,6 +255,9 @@ class AdbClient:
                     "cmd",
                     "package",
                     "query-activities",
+                    # Without --brief this prints a full ActivityInfo dump that
+                    # _parse_activity_line cannot read, and every app is missed.
+                    "--brief",
                     "-a",
                     _LAUNCH_ACTION,
                     "-c",
@@ -278,16 +295,26 @@ class AdbClient:
         return apps
 
     def launch(self, target: str, package: str, activity: str = "") -> AdbResult:
+        """Start an app. With a known activity that is one `am start -n`; without one we ask
+        the device to resolve the package's own launcher, rather than starting whatever
+        happens to answer the category."""
+        target = self.validate_target(target)
         pkg = _validated_package(package)
         if activity:
             component = f"{pkg}/{_validated_activity(activity)}"
             return self.run(["-s", target, "shell", "am", "start", "-n", component])
-        return self.run(["-s", target, "shell", "am", "start", "-a", _LAUNCH_ACTION, "-c", _LAUNCH_CATEGORIES[0]])
+        for category in _LAUNCH_CATEGORIES:
+            result = self.run(["-s", target, "shell", "monkey", "-p", pkg, "-c", category, "1"])
+            if result.ok:
+                return result
+        return result
 
     def stop(self, target: str, package: str) -> AdbResult:
+        target = self.validate_target(target)
         return self.run(["-s", target, "shell", "am", "force-stop", _validated_package(package)])
 
     def app_info(self, target: str, package: str) -> AdbResult:
+        target = self.validate_target(target)
         return self.run(
             [
                 "-s",
@@ -305,19 +332,22 @@ class AdbClient:
         )
 
     def clear_data(self, target: str, package: str) -> AdbResult:
+        target = self.validate_target(target)
         return self.run(["-s", target, "shell", "pm", "clear", _validated_package(package)])
 
     def uninstall(self, target: str, package: str) -> AdbResult:
+        target = self.validate_target(target)
         return self.run(["-s", target, "shell", "pm", "uninstall", _validated_package(package)])
 
     # -------------------------------------------------------------------------- diagnostics
 
     def screenshot(self, target: str) -> tuple[bytes, AdbResult]:
         """Grab one PNG. Binary-safe: `exec-out`, never `shell`."""
-        result = self.run(["-s", target, "exec-out", *_SCREENCAP_ARGS])
+        target = self.validate_target(target)
+        result = self.run(["-s", target, "exec-out", *_SCREENCAP_ARGS], binary=True)
         if not result.ok:
             return b"", result
-        return _png_payload(result.stdout), result
+        return _png_payload(result.raw), result
 
 
 def _validate_code(code: object) -> str:
@@ -364,13 +394,33 @@ def _category_kind(category: str) -> str:
     return "TV" if category.endswith("LEANBACK_LAUNCHER") else "PHONE"
 
 
-def _png_payload(payload: str) -> bytes:
-    data = payload.encode("utf-8", "surrogateescape")
+def _png_payload(data: bytes) -> bytes:
+    """Trim anything a device prints before the PNG signature. Bytes in, bytes out."""
+    if not isinstance(data, bytes):
+        return b""
     marker = b"\x89PNG\r\n\x1a\n"
     offset = data.find(marker)
     if offset > 0:
         data = data[offset:]
     return data
+
+
+def _looks_failed(result: AdbResult) -> bool:
+    """Decide whether a zero-exit adb call actually failed on the device.
+
+    Only the first few lines are inspected, and only anchored prefixes or unambiguous
+    phrases count, so ordinary output is never mistaken for an error.
+    """
+    for stream in (result.stderr, result.stdout):
+        for line in stream.splitlines()[:6]:
+            low = line.strip().lower()
+            if not low:
+                continue
+            if low.startswith(_FAILURE_PREFIXES):
+                return True
+            if any(marker in low for marker in _FAILURE_SUBSTRINGS):
+                return True
+    return False
 
 
 def _elapsed(started: float) -> int:

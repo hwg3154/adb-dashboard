@@ -14,6 +14,7 @@ Passwords are never returned, never echoed into a page, and never logged.
 
 from __future__ import annotations
 
+import secrets
 import threading
 import time
 from pathlib import Path
@@ -47,7 +48,18 @@ ERROR_ALREADY_INITIALIZED = "already_initialized"
 ERROR_UNAUTHORIZED = "unauthorized"
 ERROR_INTERNAL = "internal"
 
-_ZERO_HASH = "$argon2id$v=19$m=65536,t=3,p=4$AAAAAAAAAAAAAAAAAAAAAA$" + "A" * 43
+_ZERO_HASH_CACHE: list[str] = []
+
+
+def _zero_hash() -> str:
+    """A decoy hash verified when the username is unknown, so a miss costs what a hit costs.
+
+    It is generated in whatever scheme this build actually uses: a hard-coded argon2 string
+    returns instantly on a build without `argon2-cffi`, which times the answer out loud.
+    """
+    if not _ZERO_HASH_CACHE:
+        _ZERO_HASH_CACHE.append(hash_password(secrets.token_hex(16)))
+    return _ZERO_HASH_CACHE[0]
 
 _DEFAULT_MESSAGES = {
     ERROR_INVALID: "bad request",
@@ -180,21 +192,26 @@ class LoginRateLimiter:
             }
 
     def _prune(self, now: float) -> None:
-        _drop_old(self._global_hits, now, self._window)
+        self._drop_old(self._global_hits, now, self._window)
         for bucket in self._ip.values():
-            _drop_old(bucket, now, self._window)
+            self._drop_old(bucket, now, self._window)
         for bucket in self._user.values():
-            _drop_old(bucket, now, self._window)
+            self._drop_old(bucket, now, self._window)
+        self._ip = {key: bucket for key, bucket in self._ip.items() if bucket}
+        self._user = {key: bucket for key, bucket in self._user.items() if bucket}
+
+    @staticmethod
+    def _drop_old(bucket: list[float], now: float, window: int) -> None:
+        """Discard timestamps that fell out of the window, in place."""
+        cutoff = now - window
+        keep = [stamp for stamp in bucket if isinstance(stamp, float) and stamp > cutoff]
+        bucket[:] = keep
 
     def _retry_after(self, bucket: list[float], now: float) -> int:
         if not bucket:
             return self._backoff
         oldest = min(item for item in bucket if isinstance(item, float))
         return max(self._backoff, min(int(self._window - (now - oldest)), self._window))
-
-    def _save(self) -> None:
-        payload = {"version": ACCOUNTS_VERSION, "accounts": dict(self._accounts)}
-        storage.write_json_atomic(Path(self.config.data_dir) / ACCOUNTS_FILE, payload)
 
 
 class AuthService:
@@ -259,7 +276,7 @@ class AuthService:
         account = self._by_username(name)
         if account is None:
             # Spend the same work a real verify costs, so a missing user is not faster.
-            verify_password(_ZERO_HASH, password)
+            verify_password(_zero_hash(), password)
             self._limiter.record_failure(ip, name)
             raise AuthError(ERROR_BAD_CREDENTIALS, LOGIN_ERROR_MESSAGE)
 
@@ -309,7 +326,9 @@ class AuthService:
         return None
 
     def _account_for_token(self, token: str) -> Account | None:
-        user_id = self.sessions.authorize(token)
+        if not self.sessions.authorize(token):
+            return None
+        user_id = self.sessions.user_for(token)
         if not user_id:
             return None
         account = self._accounts.get(user_id)
@@ -320,7 +339,11 @@ class AuthService:
         return {"ok": True, "action": "session_opened", "token": token, "csrf": self.sessions.csrf_for(token)}
 
     def _save(self) -> None:
-        payload = {"version": ACCOUNTS_VERSION, "accounts": dict(self._accounts)}
+        # Account is a dataclass, not JSON; as_dict() is the projection storage can write.
+        payload = {
+            "version": ACCOUNTS_VERSION,
+            "accounts": {user_id: account.as_dict() for user_id, account in self._accounts.items()},
+        }
         storage.write_json_atomic(Path(self.config.data_dir) / ACCOUNTS_FILE, payload)
 
 

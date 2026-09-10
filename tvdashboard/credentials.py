@@ -40,6 +40,8 @@ USERNAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{1,30}$")
 
 _ARGON2_PREFIX = "$argon2id$"
 _SCRYPT_PREFIX = "scrypt"
+#: Stored form is `$scrypt$n=..,r=..,p=..$salt$digest`, so it splits into five fields.
+_SCRYPT_MARKER = "$scrypt$"
 _SCRYPT_N = 2**15
 _SCRYPT_R = 8
 _SCRYPT_P = 1
@@ -80,6 +82,7 @@ def hash_password(password: str) -> str:
 
     return "$".join(
         (
+            "",
             _SCRYPT_PREFIX,
             f"n={_SCRYPT_N},r={_SCRYPT_R},p={_SCRYPT_P}",
             base64.b64encode(salt).decode("ascii"),
@@ -105,7 +108,7 @@ def verify_password(encoded: object, password: str) -> bool:
         except Exception:
             return False
 
-    if not encoded.startswith(_SCRYPT_PREFIX):
+    if not encoded.startswith(_SCRYPT_MARKER):
         return False
 
     parts = encoded.split("$")

@@ -1,0 +1,3 @@
+# Runtime dependencies. design.md §2: nothing from PyPI is required - argon2-cffi is
+# preferred for password hashing and hashlib.scrypt is the fallback when it is absent.
+argon2-cffi==23.1.0

@@ -30,6 +30,8 @@ NAV: tuple[tuple[str, str], ...] = (
 )
 
 MAX_ROWS = 32
+#: Every key in the allowlist gets a tile; the cap only stops an absurd map from filling a page.
+MAX_TILES = 64
 #: A rendered list of app rows can be long; anything longer is not a page we will send.
 _MAX_RENDER_CHARS = 96 * 1024
 _FALLBACK_PAGE = "<!doctype html><p class=\"error\">page is not available</p>"
@@ -43,11 +45,11 @@ _HEX_RE = re.compile(r"^[0-9a-f]{32}$")
 
 #: The five things the launcher may do to an app. The path is the decision, not the browser.
 _APP_ACTIONS = (
-    ("/api/launch", "Launch"),
-    ("/api/stop", "Force stop"),
-    ("/api/appinfo", "App info"),
-    ("/api/clear", "Clear data"),
-    ("/api/uninstall", "Uninstall"),
+    ("/api/launch", "Launch", ""),
+    ("/api/stop", "Force stop", "Force stop this app?"),
+    ("/api/appinfo", "App info", ""),
+    ("/api/clear", "Clear data", "Erase this app's data on the TV? This cannot be undone."),
+    ("/api/uninstall", "Uninstall", "Uninstall this app from the TV? This cannot be undone."),
 )
 
 #: What each page fragment may contain. A template cannot ask for more than this.
@@ -106,8 +108,8 @@ class View:
     def index(self, reg: registry.Registry, csrf: str) -> tuple[int, str]:
         """The remote: a focusable panel of key tiles, a text field, one screenshot."""
         return self._page("Dashboard", "index", {
-            "tiles": self._tiles(),
-            "text_field": self._text_field(),
+            "tiles": self._tiles(csrf),
+            "text_field": self._text_field(csrf),
             "screenshot": self._screenshot(),
             "device": self._devices(reg, csrf),
         }, csrf)
@@ -127,7 +129,7 @@ class View:
         body = self._fill("settings", {
             "device_rows": "\n".join(item for item in rows if item)
             or '<p class=muted>No device is paired yet. Use <a href="/setup">Set up TV</a>.</p>',
-            "password_form": self._password_form(),
+            "password_form": self._password_form(csrf),
         })
         return 200, self._wrap("Settings", body, csrf)
 
@@ -147,26 +149,31 @@ class View:
 
     # --------------------------------------------------------------------------- components
 
-    def _tiles(self) -> str:
+    def _tiles(self, csrf: str = "") -> str:
         """A grid of key buttons. The alias is the only thing the browser ever names."""
         from .keys import KEY_ALIASES
 
         out: list[str] = []
-        for spec in tuple(KEY_ALIASES.values())[:MAX_ROWS]:
+        for spec in tuple(KEY_ALIASES.values())[:MAX_TILES]:
             alias = getattr(spec, "alias", "")
             label = getattr(spec, "label", "")
             if not isinstance(alias, str) or not _ALIAS_RE.match(alias):
                 continue
+            confirm = getattr(spec, "confirm", "")
             out.append(
-                '<button class=tile type=submit form=key-form name="key"'
-                ' value="' + render_attr(alias) + '">' + render_text(label) + "</button>"
+                '<button class="tile ' + render_attr(getattr(spec, "group", "")) + '"'
+                ' type=submit form=key-form name="key"'
+                ' value="' + render_attr(alias) + '"'
+                + (' data-confirm="' + render_attr(confirm) + '"' if confirm else "")
+                + ">" + render_text(label) + "</button>"
             )
-        return '<div class=keys>' + "".join(out) + "</div>"
+        return '<div class=keys>' + "".join(out) + "</div>" + _csrf_input(csrf)
 
-    def _text_field(self) -> str:
+    def _text_field(self, csrf: str = "") -> str:
         limit = min(self.config.max_text_chars, MAX_INPUT_CHARS)
         return (
-            '<label for=text>Send to TV</label>'
+            _csrf_input(csrf)
+            + '<label for=text>Send to TV</label>'
             '<input id=text name=text type=text maxlength='
             + str(limit)
             + ' autocomplete=off placeholder="a search, a title, a URL">'
@@ -200,8 +207,8 @@ class View:
         if not _PACKAGE_RE.match(package):
             return '<li class="row muted">unrecognized package</li>'
         actions = "".join(
-            _action_form(action, package, label, csrf)
-            for action, label in _APP_ACTIONS
+            _action_form(action, package, label, csrf, confirm)
+            for action, label, confirm in _APP_ACTIONS
         )
         return (
             '<li class="row">'
@@ -263,10 +270,11 @@ class View:
             "</li>"
         )
 
-    def _password_form(self) -> str:
+    def _password_form(self, csrf: str = "") -> str:
         return (
             '<form method=post action="/api/change_password" class=stack>'
-            '<label for=current>Current password</label>'
+            + _csrf_input(csrf)
+            + '<label for=current>Current password</label>'
             '<input id=current name=current type=password autocomplete=current-password maxlength=128>'
             '<label for=password>New password</label>'
             '<input id=password name=password type=password autocomplete=new-password maxlength=128>'
@@ -330,11 +338,9 @@ def _nav() -> str:
 
 
 def _notice(config: Config) -> str:
-    return (
-        "Plain HTTP on a trusted LAN. No TLS, no cloud, no telemetry."
-        if config.allow_insecure_http
-        else ""
-    )
+    if config.allow_insecure_http:
+        return ""
+    return "Plain HTTP on a trusted LAN. No TLS, no cloud, no telemetry."
 
 
 def _login_hint(first_run: bool) -> str:
@@ -343,14 +349,16 @@ def _login_hint(first_run: bool) -> str:
     return "Sign in with the dashboard password, not the TV password."
 
 
-def _action_form(action: str, package: str, label: str, csrf: str) -> str:
+def _action_form(action: str, package: str, label: str, csrf: str, confirm: str = "") -> str:
     """One app action. The action is a constant; the package is validated, never interpolated."""
     if not isinstance(package, str) or not _PACKAGE_RE.match(package):
         return ""
     return (
         '<form method=post action="'
         + render_attr(action)
-        + '" class="inline action">'
+        + '" class="inline action"'
+        + (' data-confirm="' + render_attr(confirm) + '"' if confirm else "")
+        + '>'
         + '<input type=hidden name=package value="'
         + render_attr(package)
         + '">'

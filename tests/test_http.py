@@ -1,0 +1,378 @@
+"""End-to-end tests through the real HTTP server.
+
+These start `tvdashboard.web` on a loopback port with a fake adb, and drive it the way a browser
+would: first run, sign in, CSRF, session cookie, the key path, and the guards that are supposed
+to refuse. Nothing is mocked below the socket.
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+import os
+import re
+import stat
+import tempfile
+import threading
+import unittest
+import urllib.error
+import urllib.request
+from http.cookiejar import CookieJar
+from pathlib import Path
+
+from tvdashboard import api, web
+from tvdashboard.config import Config
+
+_FAKE = """#!/usr/bin/env python3
+import base64, os, sys
+canned = os.environ.get("TVD_FAKE_STDOUT", "")
+if canned.startswith("b64:"):
+    sys.stdout.buffer.write(base64.b64decode(canned[4:]))
+else:
+    sys.stdout.write(canned)
+sys.exit(int(os.environ.get("TVD_FAKE_RC", "0")))
+"""
+
+PASSWORD = "correct-horse-battery"
+
+
+class _Base(unittest.TestCase):
+    """Harness only: no test methods, so unittest never runs this class on its own."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.dir = Path(tempfile.mkdtemp(prefix="tvd-http-"))
+        binary = cls.dir / "adb"
+        binary.write_text(_FAKE)
+        binary.chmod(binary.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+        os.environ.setdefault("TVD_FAKE_STDOUT", "")
+        os.environ.setdefault("TVD_FAKE_RC", "0")
+
+        config = Config.from_env({
+            "TVD_DATA_DIR": str(cls.dir / "data"),
+            "TVD_HTTP_ADDR": "127.0.0.1:0",
+            "TVD_ALLOW_INSECURE_HTTP": "1",
+            "TVD_ADB_BIN": str(binary),
+        })
+        # The server logs one JSON line per request to stdout; that is correct in a container
+        # and unreadable in a test run.
+        cls._log = web._log
+        web._log = lambda *args, **kwargs: None
+        cls.server = web.build(config)
+        cls.port = cls.server.server_address[1]
+        cls.base = f"http://127.0.0.1:{cls.port}"
+        cls.thread = threading.Thread(target=cls.server.serve_forever, kwargs={"poll_interval": 0.05})
+        cls.thread.daemon = True
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        web._log = cls._log
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join(timeout=5)
+
+    def setUp(self):
+        # Every test signs in, and the login budget is per-username; without a reset the
+        # sixth test would be locked out by the first five.
+        limiter = self.server.app.auth._limiter  # noqa: SLF001 - test isolation
+        limiter._ip.clear()  # noqa: SLF001
+        limiter._user.clear()  # noqa: SLF001
+        limiter._global_hits.clear()  # noqa: SLF001
+        self.jar = CookieJar()
+        self.http = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(self.jar),
+            _NoRedirect(),
+        )
+
+    # ------------------------------------------------------------------------------ helpers
+
+    def get(self, path: str):
+        return self._open(urllib.request.Request(self.base + path, method="GET"))
+
+    def post_json(self, path: str, payload: dict, *, origin: str | None = "self", csrf: str = ""):
+        body = dict(payload)
+        if csrf:
+            body["csrf"] = csrf
+        request = urllib.request.Request(
+            self.base + path,
+            data=json.dumps(body).encode("utf-8"),
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        if origin == "self":
+            request.add_header("Origin", self.base)
+        elif origin:
+            request.add_header("Origin", origin)
+        return self._open(request)
+
+    def post_form(self, path: str, payload: dict):
+        from urllib.parse import urlencode
+
+        request = urllib.request.Request(
+            self.base + path,
+            data=urlencode(payload).encode("utf-8"),
+            method="POST",
+            headers={"Content-Type": "application/x-www-form-urlencoded", "Origin": self.base},
+        )
+        return self._open(request)
+
+    def _open(self, request):
+        try:
+            response = self.http.open(request, timeout=10)
+        except urllib.error.HTTPError as exc:
+            response = exc
+        body = response.read()
+        return response.status, response.headers, body
+
+    def body_json(self, body: bytes) -> dict:
+        return json.loads(body.decode("utf-8"))
+
+    def sign_in(self) -> str:
+        """Create the account on first run (or sign in), and return the page's CSRF token."""
+        status, _, body = self.post_json(
+            "/api/login", {"username": "operator", "password": PASSWORD}
+        )
+        self.assertEqual(status, 200, body)
+        status, _, page = self.get("/")
+        self.assertEqual(status, 200)
+        match = re.search(rb'name="tvd-csrf" content="([0-9a-f]{64})"', page)
+        self.assertIsNotNone(match, "no CSRF token in the page")
+        return match.group(1).decode("ascii")
+
+
+class Live(_Base):
+    """The server with an empty registry."""
+
+    def test_01_first_run_redirects_everything_to_login(self):
+        status, headers, _ = self.get("/")
+        self.assertEqual(status, 303)
+        self.assertEqual(headers.get("Location"), "/login")
+        status, _, page = self.get("/login")
+        self.assertEqual(status, 200)
+        self.assertIn(b"Create the dashboard password", page)
+
+    def test_02_static_assets_are_served(self):
+        for path, kind in (
+            ("/static/app.css", "text/css"),
+            ("/static/app.js", "text/javascript"),
+            ("/static/placeholder.png", "image/png"),
+        ):
+            status, headers, body = self.get(path)
+            self.assertEqual(status, 200, path)
+            self.assertIn(kind, headers.get("Content-Type", ""))
+            self.assertTrue(body)
+
+    def test_03_security_headers_are_present(self):
+        _, headers, _ = self.get("/login")
+        self.assertEqual(headers.get("X-Content-Type-Options"), "nosniff")
+        self.assertIn("frame-ancestors 'none'", headers.get("Content-Security-Policy", ""))
+
+    def test_04_weak_password_is_refused_on_first_run(self):
+        status, _, body = self.post_json("/api/login", {"username": "operator", "password": "short"})
+        self.assertEqual(status, 400)
+        self.assertEqual(self.body_json(body)["error"], "weak_password")
+
+    def test_05_sign_in_sets_an_httponly_session_cookie(self):
+        status, headers, _ = self.post_json(
+            "/api/login", {"username": "operator", "password": PASSWORD}
+        )
+        self.assertEqual(status, 200)
+        cookie = headers.get("Set-Cookie", "")
+        self.assertIn("tvd_session=", cookie)
+        self.assertIn("HttpOnly", cookie)
+        self.assertIn("SameSite=Lax", cookie)
+
+    def test_06_pages_render_once_signed_in(self):
+        self.sign_in()
+        for path, marker in (
+            ("/", b"remote-panel"),
+            ("/apps", b"Launchable apps"),
+            ("/settings", b"Devices"),
+            ("/setup", b"Set up the TV"),
+        ):
+            status, _, page = self.get(path)
+            self.assertEqual(status, 200, path)
+            self.assertIn(marker, page, path)
+
+    def test_07_a_request_without_a_session_is_refused(self):
+        status, _, body = self.post_json("/api/key", {"key": "home"}, csrf="0" * 64)
+        self.assertEqual(status, 401)
+        self.assertEqual(self.body_json(body)["error"], "unauthorized")
+
+    def test_08_a_missing_or_wrong_csrf_token_is_refused(self):
+        self.sign_in()
+        status, _, body = self.post_json("/api/key", {"key": "home"})
+        self.assertEqual(status, 403)
+        self.assertEqual(self.body_json(body)["error"], "bad_csrf")
+        status, _, body = self.post_json("/api/key", {"key": "home"}, csrf="1" * 64)
+        self.assertEqual(status, 403)
+
+    def test_09_a_cross_origin_post_is_refused(self):
+        csrf = self.sign_in()
+        status, _, body = self.post_json(
+            "/api/key", {"key": "home"}, origin="http://evil.example", csrf=csrf
+        )
+        self.assertEqual(status, 403)
+        self.assertEqual(self.body_json(body)["error"], "bad_origin")
+
+    def test_10_a_key_press_without_a_device_reports_no_device(self):
+        csrf = self.sign_in()
+        status, _, body = self.post_json("/api/key", {"key": "home"}, csrf=csrf)
+        self.assertEqual(status, 409)
+        self.assertEqual(self.body_json(body)["error"], "no_device")
+
+    def test_11_an_unknown_key_is_refused_before_any_device_lookup(self):
+        csrf = self.sign_in()
+        status, _, body = self.post_json("/api/key", {"key": "KEYCODE_POWER"}, csrf=csrf)
+        self.assertEqual(status, 400)
+        self.assertEqual(self.body_json(body)["error"], "bad_key")
+
+    def test_12_the_browser_cannot_name_a_host(self):
+        csrf = self.sign_in()
+        status, _, body = self.post_json(
+            "/api/join", {"candidate_id": "8.8.8.8:5555", "pairing_code": ""}, csrf=csrf
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(self.body_json(body)["error"], "bad_candidate")
+
+    def test_12b_a_cross_site_fetch_is_refused_even_without_origin(self):
+        csrf = self.sign_in()
+        request = urllib.request.Request(
+            self.base + "/api/key",
+            data=json.dumps({"key": "home", "csrf": csrf}).encode("utf-8"),
+            method="POST",
+            headers={"Content-Type": "application/json", "Sec-Fetch-Site": "cross-site"},
+        )
+        status, _, body = self._open(request)
+        self.assertEqual(status, 403)
+        self.assertEqual(self.body_json(body)["error"], "bad_origin")
+
+    def test_12c_an_opaque_origin_is_refused(self):
+        # A sandboxed frame serialises its Origin as the string "null". That is the
+        # untrusted case the header exists to name, so it must not be accepted.
+        csrf = self.sign_in()
+        status, _, body = self.post_json("/api/key", {"key": "home"}, origin="null", csrf=csrf)
+        self.assertEqual(status, 403)
+        self.assertEqual(self.body_json(body)["error"], "bad_origin")
+
+    def test_13_an_unknown_endpoint_is_not_found(self):
+        csrf = self.sign_in()
+        status, _, body = self.post_json("/api/reboot", {}, csrf=csrf)
+        self.assertEqual(status, 404)
+
+    def test_14_a_form_post_redirects_back_to_a_page(self):
+        csrf = self.sign_in()
+        status, headers, _ = self.post_form("/api/logout", {"csrf": csrf})
+        self.assertEqual(status, 303)
+        self.assertEqual(headers.get("Location"), "/login")
+
+    def test_15_logout_revokes_the_session(self):
+        csrf = self.sign_in()
+        self.post_json("/api/logout", {}, csrf=csrf)
+        status, headers, _ = self.get("/")
+        self.assertEqual(status, 303)
+        self.assertEqual(headers.get("Location"), "/login")
+
+    def test_16_an_oversized_body_is_refused(self):
+        csrf = self.sign_in()
+        status, _, _ = self.post_json("/api/text", {"text": "x" * 200_000}, csrf=csrf)
+        self.assertEqual(status, 413)
+
+    def test_17_key_presses_are_rate_limited_per_session(self):
+        csrf = self.sign_in()
+        codes = [
+            self.post_json("/api/key", {"key": "home"}, csrf=csrf)[0]
+            for _ in range(api.KEY_BUDGET + 5)
+        ]
+        self.assertIn(429, codes, "the key budget never engaged")
+
+    def test_18_healthz_needs_no_session(self):
+        status, _, body = self.get("/healthz")
+        self.assertEqual(status, 200)
+        self.assertTrue(self.body_json(body)["ok"])
+
+    def test_19_get_is_refused_for_state_changing_paths(self):
+        self.sign_in()
+        status, _, _ = self.get("/api/key")
+        self.assertEqual(status, 404)
+
+
+class WithDevice(_Base):
+    """The same server, with one device in the registry, so the device paths actually run."""
+
+    def setUp(self):
+        super().setUp()
+        with self.server.app.lock:
+            self.device = self.server.app.registry.add("192.168.1.5:5555", model="Test TV")
+
+    def tearDown(self):
+        with self.server.app.lock:
+            self.server.app.registry.remove(self.device.id)
+        os.environ["TVD_FAKE_STDOUT"] = ""
+
+    def test_90_a_key_press_reaches_adb(self):
+        csrf = self.sign_in()
+        status, _, body = self.post_json("/api/key", {"key": "dpad_up"}, csrf=csrf)
+        self.assertEqual(status, 200, body)
+        payload = self.body_json(body)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["key"], "dpad_up")
+
+    def test_91_text_is_sent_and_never_echoed_back(self):
+        csrf = self.sign_in()
+        status, _, body = self.post_json("/api/text", {"text": "some search"}, csrf=csrf)
+        self.assertEqual(status, 200, body)
+        payload = self.body_json(body)
+        self.assertEqual(payload["chars"], len("some search"))
+        self.assertNotIn("some search", body.decode("utf-8"))
+
+    def test_92_unsendable_text_is_refused(self):
+        csrf = self.sign_in()
+        status, _, body = self.post_json("/api/text", {"text": "$$$"}, csrf=csrf)
+        self.assertEqual(status, 400)
+        self.assertEqual(self.body_json(body)["error"], "bad_text")
+
+    def test_93_a_screenshot_comes_back_as_base64_png(self):
+        png = b"\x89PNG\r\n\x1a\n" + bytes(range(256))
+        os.environ["TVD_FAKE_STDOUT"] = "b64:" + base64.b64encode(png).decode("ascii")
+        csrf = self.sign_in()
+        status, _, body = self.post_json("/api/screenshot", {}, csrf=csrf)
+        self.assertEqual(status, 200, body)
+        payload = self.body_json(body)
+        self.assertEqual(base64.b64decode(payload["png"])[:8], b"\x89PNG\r\n\x1a\n")
+
+    def test_94_the_app_list_is_parsed(self):
+        os.environ["TVD_FAKE_STDOUT"] = "Activity #0:\n  com.example.tv/.MainActivity\n"
+        csrf = self.sign_in()
+        status, _, body = self.post_json("/api/apps", {}, csrf=csrf)
+        self.assertEqual(status, 200, body)
+        self.assertEqual(self.body_json(body)["apps"][0]["package"], "com.example.tv")
+
+    def test_95_a_bad_package_never_reaches_adb(self):
+        csrf = self.sign_in()
+        for bad in ("com.example.app; reboot", "../etc", "nodots"):
+            status, _, body = self.post_json("/api/launch", {"package": bad}, csrf=csrf)
+            self.assertEqual(status, 400, bad)
+            self.assertEqual(self.body_json(body)["error"], "bad_package")
+
+    def test_96_a_device_can_be_forgotten_by_id(self):
+        csrf = self.sign_in()
+        status, _, body = self.post_json(
+            f"/api/devices/{self.device.id}/forget", {}, csrf=csrf
+        )
+        self.assertEqual(status, 200, body)
+        self.assertEqual(self.body_json(body)["action"], "forgotten")
+        with self.server.app.lock:
+            self.assertIsNone(self.server.app.registry.get(self.device.id))
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Follow nothing: these tests assert on the redirect itself."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+if __name__ == "__main__":
+    unittest.main()

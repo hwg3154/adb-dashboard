@@ -133,6 +133,14 @@ class SessionStore:
             return False
         return hmac.compare_digest(supplied, expected)
 
+    def user_for(self, token: object) -> str:
+        """The account id behind a live token, or ''. Never leaves the server."""
+        record = self._sessions.get(token.strip() if isinstance(token, str) else "")
+        if not isinstance(record, dict):
+            return ""
+        user_id = record.get("user_id")
+        return user_id if is_token(user_id) else ""
+
     def csrf_for(self, token: object) -> str:
         """Return the session's CSRF token, validated. The browser receives it in a page, once."""
         record = self._sessions.get(token.strip() if isinstance(token, str) else "")
@@ -184,6 +192,11 @@ class SessionStore:
     # -------------------------------------------------------------------------------- private
 
     def _trim(self, now: int) -> None:
+        """Drop expired sessions, then keep the newest `max_sessions`.
+
+        Newest wins: the session just issued must survive, and the operator signing in on a
+        third device should displace their oldest login, not be silently refused.
+        """
         live: dict[str, dict[str, object]] = {}
         for token, record in self._sessions.items():
             if not isinstance(token, str) or not is_token(token) or not isinstance(record, dict):
@@ -197,8 +210,11 @@ class SessionStore:
             if last_seen and (now - last_seen) > self._idle:
                 continue
             live[token] = record
-            if len(live) >= self._max_sessions:
-                break
+        # created_at has one-second granularity, so sorting by it cannot separate sessions
+        # opened in the same second. Insertion order is the issue order, and the session just
+        # issued is always last, so keeping the tail keeps the newest.
+        if len(live) > self._max_sessions:
+            live = dict(list(live.items())[-self._max_sessions :])
         self._sessions = live
 
     def _save(self) -> None:
