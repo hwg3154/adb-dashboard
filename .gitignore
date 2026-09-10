@@ -1,0 +1,51 @@
+# --- Runtime data (TVD_DATA_DIR) -------------------------------------------
+# These hold password hashes, live session tokens and paired-device records.
+# Never commit them, wherever the data dir happens to point.
+/var/
+/data/
+accounts.json
+sessions.json
+devices.json
+
+# --- Secrets ----------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+adbkey
+adbkey.pub
+
+# --- Python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Packaging / build
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Test & type-check caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# --- Editors / OS -----------------------------------------------------------
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~

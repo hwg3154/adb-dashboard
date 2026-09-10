@@ -1,0 +1,32 @@
+:root { --fg:#17202a; --muted:#6b7280; --line:#d6dbe1; --bg:#f7f8fa; --accent:#0b6bcb; --danger:#b3261e; }
+* { box-sizing: border-box; }
+body { margin:0; color:var(--fg); background:var(--bg); font:15px/1.5 system-ui,-apple-system,sans-none,sans-serif; }
+.bar { display:flex; align-items:center; gap:16px; padding:12px 16px; background:#fff; border-bottom:1px solid var(--line); }
+.brand { font-weight:600; text-decoration:none; color:var(--fg); }
+.nav { display:flex; gap:12px; flex:1; }
+.nav a { color:var(--accent); text-decoration:none; }
+.nav-on { font-weight:600; }
+.state { color:var(--muted); font-variant-numeric:tabular-nums; }
+.state.on { color:var(--accent); font-weight:600; }
+.page { max-width:900px; margin:0 auto; padding:16px; }
+.panel { background:#fff; border:1px solid var(--line); border-radius:8px; padding:16px; margin-bottom:16px; }
+.narrow { max-width:420px; margin-inline:auto; }
+.muted { color:var(--muted); }
+.error { color:var(--danger); }
+.stack { display:grid; gap:8px; }
+.stack label { font-size:13px; color:var(--muted); }
+input[type=text], input[type=password] { padding:9px 10px; border:1px solid var(--line); border-radius:6px; font:inherit; }
+button { padding:9px 14px; border:1px solid var(--line); border-radius:6px; background:#f0f3f7; color:var(--fg); font:inherit; cursor:pointer; }
+button:hover { background:#e6ebf2; }
+button:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+.danger { color:var(--danger); }
+.remote:focus { outline:2px solid var(--accent); }
+.keys { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; }
+@media (min-width:720px) { .keys { grid-template-columns:repeat(6,minmax(0,1fr)); } }
+ul { list-style:none; padding:0; margin:0; }
+.row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; padding:10px 0; border-bottom:1px solid var(--line); }
+.pkg, .label, .model { font-family:ui-monospace,SFMono-Regular,monospace; font-size:13px; }
+.host, .score { color:var(--muted); font-size:13px; }
+.actions { display:flex; gap:6px; margin-left:auto; }
+.inline { display:inline; }
+.screen { display:block; max-width:100%; height:auto; border:1px solid var(--line); border-radius:6px; }
