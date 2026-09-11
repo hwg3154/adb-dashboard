@@ -228,6 +228,29 @@ button[disabled] { opacity: .55; cursor: default; }
 .tile.g-system { color: var(--danger); }
 .tile.app { font-weight: 600; }
 
+/* A quick-launch tile with artwork is the artwork: the wordmarks already carry the name, and
+   the supplied logos are dark plates, so the tile matches them rather than framing them. */
+.tile.app.art {
+  padding: 0;
+  overflow: hidden;
+  background: #0b0e13;
+  border-color: #23293a;
+  aspect-ratio: 16 / 9;
+  display: grid;
+  place-items: stretch;
+}
+.tile.app.art .logo {
+  display: block;
+  width: 100%;
+  height: 100%;
+  /* `contain` because a wordmark that gets cropped is a logo nobody recognises. */
+  object-fit: contain;
+  object-position: center;
+}
+.tile.app.art:hover { border-color: var(--accent); }
+/* The tile is the button, so the focus ring has to sit outside the clipped artwork. */
+.tile.app.art:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
 .key-group { border-top: 1px solid var(--line); padding-top: 10px; }
 .key-group > summary {
   cursor: pointer;
@@ -270,6 +293,16 @@ button[disabled] { opacity: .55; cursor: default; }
 }
 .choice.on .check { background: var(--tile); border-color: var(--accent); }
 .choice.on .box { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+.choice .thumb {
+  flex: none;
+  width: 44px;
+  height: 26px;
+  object-fit: contain;
+  border-radius: 4px;
+  background: #0b0e13;
+}
+/* A row with no artwork keeps the same indent, so the names stay in one column. */
+.choice .thumb.none { background: transparent; }
 .choice .name { flex: 1; }
 .choice .pill {
   font-size: 11px;

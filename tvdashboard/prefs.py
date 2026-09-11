@@ -79,7 +79,11 @@ class Prefs:
     def tiles(self) -> list[dict[str, object]]:
         """What the dashboard draws: label plus alias, only for what is switched on."""
         return [
-            {"alias": platform.alias, "label": platform.label}
+            {
+                "alias": platform.alias,
+                "label": platform.label,
+                "logo": platforms.logo_url(platform.alias),
+            }
             for platform in platforms.enabled_platforms(self.quick_launch)
         ]
 

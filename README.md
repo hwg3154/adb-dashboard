@@ -16,7 +16,13 @@ The product and security contract is [docs/design.md](docs/design.md). adb synta
   to the page.
 - Quick launch: one tile per streaming service — Netflix, Disney+, Prime Video, YouTube and
   HBO Max are on by default, and Settings has a checkbox for every app in the catalogue so the
-  ones you do not have never appear.
+  ones you do not have never appear. A service with artwork shows its logo; the rest show their
+  name.
+
+  To add a logo, drop a `png`, `jpg` or `webp` into `tvdashboard/static/logos/` named for the
+  catalogue alias in `tvdashboard/platforms.py` (`netflix.jpg`, `prime_video.png`, …). It is
+  picked up at start-up. A file named after anything else is ignored, and no SVGs: the server
+  will not serve a format that can carry script. The full-size originals live in `logos/`.
 - A "Send to TV" text field for the focused input on the device.
 - A launcher: list launchable apps, launch, force stop, app info, clear data, uninstall.
 - One screenshot, on request. There is no stream and no screen view.

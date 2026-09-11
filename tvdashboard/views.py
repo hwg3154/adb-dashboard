@@ -42,6 +42,8 @@ _ALIAS_RE = re.compile(r"^[a-z][a-z0-9_]{1,32}$")
 _PACKAGE_RE = re.compile(r"^[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+$")
 _HOST_RE = re.compile(r"^(?:\d{1,3}\.){3}\d{1,3}$")
 _HEX_RE = re.compile(r"^[0-9a-f]{32}$")
+#: A logo URL this server serves: our prefix, one safe filename, a known extension.
+_LOGO_URL_RE = re.compile(r"^/static/logos/[a-z0-9_]{1,32}\.(?:png|jpe?g|webp)$")
 
 #: The five things the launcher may do to an app. The path is the decision, not the browser.
 _APP_ACTIONS = (
@@ -316,9 +318,10 @@ class View:
             if not isinstance(alias, str) or not _ALIAS_RE.match(alias):
                 continue
             rows.append(
-                '<button class="tile app" type=submit form=quick-form name="platform"'
+                '<button class="tile app' + (" art" if _logo_of(tile) else "") + '"'
+                ' type=submit form=quick-form name="platform"'
                 ' value="' + render_attr(alias) + '">'
-                + render_text(label)
+                + _logo_img(tile, label)
                 + "</button>"
             )
         if not rows:
@@ -365,7 +368,9 @@ class View:
                 + ("true" if on else "false")
                 + '"><span class="box" aria-hidden="true">'
                 + ("&#10003;" if on else "")
-                + "</span><span class=name>"
+                + "</span>"
+                + _logo_thumb(item)
+                + "<span class=name>"
                 + render_text(label)
                 + "</span>"
                 + ('<span class="pill">on this TV</span>' if detected else "")
@@ -567,6 +572,46 @@ def _login_banner(code: object) -> str:
         + '" role="status">'
         + render_text(message)
         + "</p>"
+    )
+
+
+def _logo_of(tile: object) -> str:
+    """The logo URL on a tile projection, if it is one of ours.
+
+    `platforms` builds these from the catalogue, but the check is cheap and this is the last
+    place before the value reaches an attribute, so it is made here too.
+    """
+    if not isinstance(tile, dict):
+        return ""
+    logo = tile.get("logo", "")
+    if not isinstance(logo, str) or not _LOGO_URL_RE.match(logo):
+        return ""
+    return logo
+
+
+def _logo_img(tile: object, label: str) -> str:
+    """A quick-launch tile's face: the artwork, or the service's name.
+
+    The logo carries the name as its `alt`, so the button reads the same to a screen reader
+    either way, and a logo that fails to load still leaves a usable button.
+    """
+    logo = _logo_of(tile)
+    if not logo:
+        return '<span class="name">' + render_text(label) + "</span>"
+    return (
+        '<img class="logo" src="' + render_attr(logo) + '"'
+        ' alt="' + render_attr(label) + '" loading="lazy" decoding="async">'
+    )
+
+
+def _logo_thumb(item: object) -> str:
+    """A small logo for a Settings row. Decorative: the row already says the name."""
+    logo = _logo_of(item)
+    if not logo:
+        return '<span class="thumb none" aria-hidden="true"></span>'
+    return (
+        '<img class="thumb" src="' + render_attr(logo) + '" alt="" aria-hidden="true"'
+        ' loading="lazy" decoding="async">'
     )
 
 

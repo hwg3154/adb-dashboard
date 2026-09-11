@@ -163,6 +163,25 @@ class Live(_Base):
             self.assertIn(kind, headers.get("Content-Type", ""))
             self.assertTrue(body)
 
+    def test_02b_quick_launch_logos_are_served(self):
+        from tvdashboard import platforms
+
+        self.assertTrue(platforms.LOGOS, "no logo shipped with the package")
+        for url, (_relative, content_type) in platforms.logo_files().items():
+            status, headers, body = self.get(url)
+            self.assertEqual(status, 200, url)
+            self.assertEqual(headers.get("Content-Type"), content_type, url)
+            self.assertTrue(body, url)
+
+    def test_02c_only_catalogued_logos_are_reachable(self):
+        for bad in (
+            "/static/logos/nope.jpg",
+            "/static/logos/app.css",
+            "/static/logos/",
+        ):
+            status, _, _ = self.get(bad)
+            self.assertIn(status, (303, 404), bad)
+
     def test_03_security_headers_are_present(self):
         _, headers, _ = self.get("/login")
         self.assertEqual(headers.get("X-Content-Type-Options"), "nosniff")
@@ -309,6 +328,22 @@ class Live(_Base):
                 self.assertRegex(
                     match.group(1), r"^[0-9a-f]{64}$", f"empty/short csrf on {path}"
                 )
+
+    def test_12f_a_tile_with_artwork_renders_an_image_with_the_name_as_alt(self):
+        from tvdashboard import platforms
+
+        self.sign_in()
+        _, _, page = self.get("/")
+        body = page.decode("utf-8")
+        alias = next(iter(platforms.LOGOS))
+        label = platforms.CATALOG[alias].label
+        if alias in self.server.app.prefs.quick_launch:
+            self.assertIn(platforms.logo_url(alias), body)
+            self.assertIn(f'alt="{label}"', body)
+        # A platform with no artwork shows its name instead, so the button is never blank.
+        plain = [a for a in self.server.app.prefs.quick_launch if a not in platforms.LOGOS]
+        for missing in plain:
+            self.assertIn(platforms.CATALOG[missing].label, body)
 
     def test_13_an_unknown_endpoint_is_not_found(self):
         csrf = self.sign_in()

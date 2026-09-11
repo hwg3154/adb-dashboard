@@ -23,7 +23,7 @@ import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable
 
-from . import api, security, storage, views
+from . import api, platforms, security, storage, views
 from .adb import AdbClient
 from .auth import AuthService
 from .config import COOKIE_NAME, Config
@@ -41,6 +41,10 @@ _STATIC: dict[str, tuple[str, str]] = {
     "/static/app.js": ("app.js", "text/javascript; charset=utf-8"),
     "/static/placeholder.png": ("placeholder.png", "image/png"),
 }
+
+#: Quick-launch artwork, added from the catalogue rather than from the URL: the key is a path
+#: we built, so a browser still cannot name a file.
+_STATIC.update(platforms.logo_files())
 
 _STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 

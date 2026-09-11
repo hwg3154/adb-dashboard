@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
 #: Aliases are ours, not the browser's, but they still get a shape check on the way in.
 ALIAS_RE = re.compile(r"^[a-z][a-z0-9_]{1,31}$")
@@ -26,6 +27,21 @@ PACKAGE_RE = re.compile(r"^[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+$")
 #: How many packages one quick-launch press may try before giving up. A miss costs one
 #: `am start` that fails immediately, so this stays small.
 MAX_LAUNCH_ATTEMPTS = 3
+
+#: Artwork lives beside the other static files so it ships inside the package (and so the
+#: container gets it from one `COPY`). A logo is named for the alias it belongs to; anything
+#: else in the directory is ignored, which is what keeps a filename from becoming a URL.
+LOGO_DIR = Path(__file__).resolve().parent / "static" / "logos"
+LOGO_URL_PREFIX = "/static/logos/"
+
+#: Extensions we are willing to serve, mapped to what we will call them. SVG is deliberately
+#: absent: it is a document, it can carry script, and a logo does not need one.
+LOGO_TYPES: dict[str, str] = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+}
 
 
 @dataclass(frozen=True)
@@ -97,6 +113,54 @@ DEFAULT_ALIASES: tuple[str, ...] = tuple(
 )
 
 
+def scan_logos(directory: Path | None = None) -> dict[str, str]:
+    """Map alias -> logo filename, for the aliases that actually have artwork.
+
+    Read once at import. A missing directory, an unreadable one, or a file named after
+    nothing in the catalogue all mean the same thing: that platform shows its name instead.
+    """
+    root = LOGO_DIR if directory is None else Path(directory)
+    found: dict[str, str] = {}
+    try:
+        entries = sorted(root.iterdir())
+    except OSError:
+        return found
+    for entry in entries:
+        if not entry.is_file():
+            continue
+        alias = entry.stem.strip().lower()
+        suffix = entry.suffix.lower()
+        if suffix not in LOGO_TYPES or alias not in CATALOG:
+            continue
+        found.setdefault(alias, entry.name)
+    return found
+
+
+#: Aliases that have artwork, resolved once. The tiles fall back to a label without it.
+LOGOS: dict[str, str] = scan_logos()
+
+
+def logo_url(alias: object) -> str:
+    """The URL for a platform's logo, or '' when it has none.
+
+    The alias is validated against the catalogue first, so this can only ever name a file we
+    put there ourselves - a browser cannot ask for a path.
+    """
+    candidate = clean_alias(alias)
+    filename = LOGOS.get(candidate, "")
+    return LOGO_URL_PREFIX + filename if filename else ""
+
+
+def logo_files() -> dict[str, tuple[str, str]]:
+    """URL path -> (path under `static/`, content type), for the server's static table."""
+    out: dict[str, tuple[str, str]] = {}
+    for alias, filename in LOGOS.items():
+        content_type = LOGO_TYPES.get(Path(filename).suffix.lower(), "")
+        if content_type:
+            out[LOGO_URL_PREFIX + filename] = ("logos/" + filename, content_type)
+    return out
+
+
 class UnknownPlatform(ValueError):
     """Raised when the browser names a platform that is not in the catalogue."""
 
@@ -146,6 +210,7 @@ def listing(enabled: object = None) -> list[dict[str, object]]:
             "alias": platform.alias,
             "label": platform.label,
             "package": platform.package,
+            "logo": logo_url(platform.alias),
             "on": platform.alias in chosen,
         }
         for platform in CATALOG.values()
@@ -171,6 +236,12 @@ def _as_alias_set(enabled: object) -> frozenset[str]:
 __all__ = [
     "CATALOG",
     "DEFAULT_ALIASES",
+    "LOGOS",
+    "LOGO_DIR",
+    "LOGO_TYPES",
+    "logo_files",
+    "logo_url",
+    "scan_logos",
     "Platform",
     "UnknownPlatform",
     "clean_alias",

@@ -3,6 +3,7 @@ the RFC1918/loopback guard, candidate dedupe, and the quick-launch catalogue."""
 
 from __future__ import annotations
 
+import pathlib
 import re
 import tempfile
 import unittest
@@ -160,6 +161,56 @@ class CandidateCache(unittest.TestCase):
         ids = {registry.new_device_id() for _ in range(200)}
         self.assertEqual(len(ids), 200)
         self.assertTrue(all(len(item) == 32 for item in ids))
+
+
+class QuickLaunchLogos(unittest.TestCase):
+    """Artwork is data on disk, so the wiring between the two has to be checked."""
+
+    def test_every_logo_file_belongs_to_a_catalogue_alias(self):
+        # A file named after nothing is a file nobody will ever see; more importantly it
+        # proves the scan is keyed by the catalogue and not by whatever is in the directory.
+        for alias in platforms.LOGOS:
+            self.assertIn(alias, platforms.CATALOG, alias)
+
+    def test_a_platform_without_artwork_has_no_url(self):
+        without = [a for a in platforms.CATALOG if a not in platforms.LOGOS]
+        self.assertTrue(without, "every platform has a logo; pick a different fixture")
+        self.assertEqual(platforms.logo_url(without[0]), "")
+
+    def test_a_logo_url_is_one_we_built(self):
+        for alias in platforms.LOGOS:
+            url = platforms.logo_url(alias)
+            self.assertRegex(url, r"^/static/logos/[a-z0-9_]+\.(?:png|jpe?g|webp)$")
+
+    def test_the_browser_cannot_name_a_logo_file(self):
+        # A filename or a path is not an alias, so it resolves to nothing at all.
+        for bad in ("../config", "netflix.jpg", "/etc/passwd", "logos/netflix", "", None, 7):
+            self.assertEqual(platforms.logo_url(bad), "", repr(bad))
+
+    def test_an_alias_is_matched_without_regard_to_case(self):
+        # clean_alias normalizes before it looks up, the same way resolve() does, so the
+        # catalogue answers consistently wherever an alias arrives from.
+        alias = next(iter(platforms.LOGOS))
+        self.assertEqual(platforms.logo_url(alias.upper()), platforms.logo_url(alias))
+
+    def test_every_advertised_file_exists_and_is_typed(self):
+        for url, (relative, content_type) in platforms.logo_files().items():
+            path = platforms.LOGO_DIR.parent / relative
+            self.assertTrue(path.is_file(), relative)
+            self.assertIn(content_type, set(platforms.LOGO_TYPES.values()))
+            self.assertTrue(url.endswith(path.name))
+
+    def test_a_missing_directory_is_not_an_error(self):
+        self.assertEqual(platforms.scan_logos(pathlib.Path("/nonexistent/logos")), {})
+
+    def test_svg_is_not_served(self):
+        # An SVG is a document that can carry script; a logo does not need to be one.
+        self.assertNotIn(".svg", platforms.LOGO_TYPES)
+
+    def test_tiles_and_catalogue_rows_both_carry_the_logo(self):
+        store = prefs.Prefs(_config(), ("netflix",))
+        for row in store.tiles() + store.catalog():
+            self.assertIn("logo", row)
 
 
 class PlatformCatalog(unittest.TestCase):
