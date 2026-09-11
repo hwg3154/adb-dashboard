@@ -19,6 +19,12 @@ _HOST_RE = re.compile(r"^(?:\d{1,3}\.){3}\d{1,3}$")
 _TARGET_RE = re.compile(r"^(\d{1,3}(?:\.\d{1,3}){3}):(\d{2,5})$")
 _PAIR_CODE_RE = re.compile(r"^\d{6,10}$")
 
+#: Android 11+ shows a *pairing* port next to the code, and it is a fresh random one each
+#: time - not 5555. Pairing against the connect port simply fails, so the pairing address
+#: gets its own check: same RFC1918 host rule, any ephemeral port.
+PAIR_PORT_MIN = 1024
+PAIR_PORT_MAX = 65535
+
 _REJECTED_NETS: tuple[ipaddress.IPv4Network, ...] = tuple(
     ipaddress.ip_network(net)
     for net in (
@@ -78,6 +84,45 @@ def normalize_target(value: object, allowed_cidrs: tuple[str, ...], ports: tuple
         raise TargetRejected("target is outside the allowed network")
 
     return f"{address}:{port}"
+
+
+def normalize_pair_target(value: object, allowed_cidrs: tuple[str, ...]) -> tuple[str, int]:
+    """Validate the `host:port` the TV shows in its pairing dialog.
+
+    The host is held to exactly the same rule as any other target - dotted IPv4, RFC1918,
+    nothing loopback or link-local - so this widens the port and nothing else.
+    """
+    if not isinstance(value, str):
+        raise TargetRejected("pairing address must be a string")
+    raw = value.strip()
+    if not raw or len(raw) > 64:
+        raise TargetRejected("pairing address has the wrong shape")
+    if "://" in raw or "@" in raw or "/" in raw:
+        raise TargetRejected("pairing address must not contain a URL")
+
+    match = _TARGET_RE.match(raw)
+    if not match:
+        raise TargetRejected("pairing address must be host:port")
+    host, port_text = match.group(1), match.group(2)
+    if not _HOST_RE.match(host):
+        raise TargetRejected("only dotted IPv4 targets are allowed")
+
+    try:
+        port = int(port_text)
+    except (TypeError, ValueError) as exc:
+        raise TargetRejected("pairing port is not a number") from exc
+    if not PAIR_PORT_MIN <= port <= PAIR_PORT_MAX:
+        raise TargetRejected("pairing port is out of range")
+
+    try:
+        address = ipaddress.IPv4Address(host)
+    except (TypeError, ValueError) as exc:
+        raise TargetRejected("only dotted IPv4 targets are allowed") from exc
+    if _is_excluded(address):
+        raise TargetRejected("target is not a usable unicast address")
+    if not _in_allowed_nets(address, allowed_cidrs):
+        raise TargetRejected("target is outside the allowed network")
+    return str(address), port
 
 
 def candidate_id(value: object) -> str:

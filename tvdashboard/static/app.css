@@ -238,6 +238,22 @@ button[disabled] { opacity: 0.5; cursor: default; transform: none; }
 }
 .ghost:hover { background: var(--control); color: var(--fg); }
 .danger { color: var(--danger); }
+.inline-form { max-width: 420px; gap: 8px; }
+.inline-form button { margin-top: 6px; justify-self: start; padding-inline: 22px; }
+/* An address and its port belong on one line; the port is a short fixed choice. */
+.field-row { display: flex; gap: 8px; }
+.field-row input { flex: 1; }
+select {
+  min-height: var(--tap);
+  padding: 0 12px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius);
+  background: var(--control);
+  color: var(--fg);
+  font: inherit;
+}
+select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
 .signout { margin-top: 18px; }
 .signout button { max-width: 190px; }
 

@@ -43,9 +43,20 @@ _FORM_REDIRECT = {
     "/api/login": "/",
     "/api/logout": "/login?e=signed_out",
     "/api/change_password": "/settings",
-    "/api/join": "/settings",
+    "/api/join": "/settings?e=joined",
+    "/api/devices/add": "/settings?e=joined",
+    "/api/pair": "/setup?e=paired",
     "/api/discover": "/setup",
     "/api/prefs/quick_launch": "/settings",
+}
+
+#: Where a *failed* form POST lands, so a typo never ends on a page of raw JSON. The code
+#: travels in `?e=` and `views.SETUP_NOTICES` decides the words.
+_FAILURE_REDIRECT = {
+    "/api/devices/add": "/setup",
+    "/api/pair": "/setup",
+    "/api/join": "/setup",
+    "/api/discover": "/setup",
 }
 
 #: Failure codes a browser may be sent back to `/login` with. The page turns one of these into
@@ -143,8 +154,20 @@ def handle(app: object, request: Request, ip: str = "") -> Result:
 
 
 def _finish(request: Request, path: str, result: Result) -> Result:
-    """Give a form POST somewhere to land; leave a JSON caller alone."""
-    if result.redirect or result.status >= 400 or not _is_form(request):
+    """Give a form POST somewhere to land; leave a JSON caller alone.
+
+    A failure needs a destination as much as a success does. Without one the browser is left
+    displaying a page of JSON with no way back, which is the single most annoying thing a
+    form can do - so a failed setup POST goes back to the page it came from, carrying a code
+    the page turns into a sentence.
+    """
+    if result.redirect or not _is_form(request):
+        return result
+    if result.status >= 400:
+        landing = _FAILURE_REDIRECT.get(path)
+        if landing:
+            code = result.payload.get("error", "")
+            result.redirect = landing + "?e=" + (code if isinstance(code, str) else "")
         return result
     result.redirect = _FORM_REDIRECT.get(path) or _referer_path(request)
     return result
@@ -408,6 +431,107 @@ def _discover(app: object, request: Request, token: str, ip: str) -> Result:
     return ok(candidates=listed, count=len(listed))
 
 
+def _add_device(app: object, request: Request, token: str, ip: str) -> Result:
+    """Add a TV by typing its address, for when discovery cannot see it.
+
+    Discovery is a convenience, not the only way in: a TV on another subnet, behind a NATted
+    container, or simply asleep during the sweep will never appear in a candidate list, and
+    the operator usually knows the address anyway.
+
+    The browser names a host here, which the candidate flow deliberately avoids - so the same
+    guard does the deciding: dotted IPv4, RFC1918 only, and a configured adb port. It cannot
+    be pointed at loopback, at link-local, or off the LAN.
+    """
+    raw = request.text("host").strip()
+    port = request.text("port").strip()
+    if port and ":" not in raw:
+        raw = f"{raw}:{port}"
+    try:
+        target = netguard.normalize_target(raw, app.config.allowed_cidrs, app.config.device_ports)
+    except netguard.TargetRejected as exc:
+        return fail("bad_host", 400, detail=str(exc))
+
+    try:
+        connected = app.adb.connect(target)
+    except AdbError:
+        return fail("adb_missing", 503)
+    if not connected.ok:
+        # Android 11+ refuses an unpaired connect, and that is the common case here.
+        return fail("connect_failed", 502)
+
+    try:
+        with app.lock:
+            device = app.registry.add(target, model=_model_of(app, target))
+    except RegistryError:
+        return fail("device_limit", 409)
+    return ok(action="joined", device=device.public())
+
+
+def _pair(app: object, request: Request, token: str, ip: str) -> Result:
+    """Pair with the address and code the TV shows under Wireless debugging.
+
+    The pairing address is not the connect address: Android hands out a fresh random port for
+    pairing and keeps 5555 (or its own random port) for the connection. They are asked for
+    separately because the TV displays them separately.
+    """
+    try:
+        pair_host, pair_port = netguard.normalize_pair_target(
+            request.text("pair_address"), app.config.allowed_cidrs
+        )
+        code = netguard.validate_pair_code(request.text("pairing_code"))
+    except netguard.TargetRejected as exc:
+        return fail("bad_pair_address", 400, detail=str(exc))
+    if not code:
+        return fail("bad_pair_code")
+
+    try:
+        paired = app.adb.pair(pair_host, pair_port, code)
+    except AdbError:
+        return fail("adb_missing", 503)
+    except ValueError:
+        return fail("bad_pair_code")
+    if not paired.ok:
+        return fail("pairing_failed", 502)
+
+    # Pairing does not connect. The connect port is the one the TV lists under its own name
+    # in the wireless-debugging screen, which is usually 5555.
+    connect_raw = request.text("host").strip() or pair_host
+    try:
+        target = netguard.normalize_target(
+            connect_raw, app.config.allowed_cidrs, app.config.device_ports
+        )
+    except netguard.TargetRejected:
+        return ok(action="paired", connected=False)
+
+    try:
+        connected = app.adb.connect(target)
+    except AdbError:
+        return fail("adb_missing", 503)
+    if not connected.ok:
+        return ok(action="paired", connected=False)
+
+    try:
+        with app.lock:
+            device = app.registry.add(target, model=_model_of(app, target))
+    except RegistryError:
+        return fail("device_limit", 409)
+    result = ok(action="joined", connected=True, device=device.public())
+    result.redirect = "/settings?e=joined" if _is_form(request) else ""
+    return result
+
+
+def _model_of(app: object, target: str) -> str:
+    """Ask the device what it is, for the label. A device that will not say is still added."""
+    try:
+        result = app.adb.run_on_device(target, ["shell", "getprop", "ro.product.model"])
+    except (AdbError, ValueError):
+        return ""
+    if not result.ok:
+        return ""
+    lines = result.lines()
+    return lines[0][:48] if lines else ""
+
+
 def _join(app: object, request: Request, token: str, ip: str) -> Result:
     """Turn a candidate into a registered device: pair if asked, connect, then persist."""
     try:
@@ -563,6 +687,8 @@ _ROUTES: dict[str, Callable[[object, Request, str, str], Result]] = {
     "/api/uninstall": _app_action("uninstall"),
     "/api/discover": _discover,
     "/api/join": _join,
+    "/api/devices/add": _add_device,
+    "/api/pair": _pair,
     "/api/devices/use": _device_form,
     "/api/devices/set_nickname": _device_form,
     "/api/devices/remove": _device_form,

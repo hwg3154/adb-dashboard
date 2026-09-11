@@ -1,7 +1,20 @@
+$notice
 <section class="panel">
 <h2>Set up the TV</h2>
-<p class="muted">The dashboard looked for devices on this network. Pick one and join it.</p>
+<p class="muted">The dashboard looked for devices on this network. Pick one, or add it by address.</p>
 <ul class="candidates">$candidate_rows</ul>
-<p class="muted">Android 11 and newer needs the pairing code the TV shows on screen.
-Older TVs with "adb over network" do not.</p>
+</section>
+<section class="panel">
+<h2>Add by address</h2>
+<p class="muted">Use this when the scan cannot see the TV: a different subnet, a NATted
+container, or a TV that was asleep. It must already allow adb over the network.</p>
+$manual_form
+</section>
+<section class="panel">
+<h2>Pair a new TV</h2>
+<p class="muted">Android 11 and newer must be paired first. On the TV open
+<strong>Settings &rsaquo; System &rsaquo; Developer options &rsaquo; Wireless debugging &rsaquo;
+Pair device with pairing code</strong>. It shows a pairing address and a six-digit code, and
+lists its own address separately &mdash; that second one is what to connect to.</p>
+$pair_form
 </section>

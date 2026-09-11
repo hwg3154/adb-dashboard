@@ -345,6 +345,89 @@ class Live(_Base):
         for missing in plain:
             self.assertIn(platforms.CATALOG[missing].label, body)
 
+    def test_12g_a_tv_can_be_added_by_typing_its_address(self):
+        csrf = self.sign_in()
+        status, _, body = self.post_json(
+            "/api/devices/add", {"host": "192.168.1.42", "port": "5555"}, csrf=csrf
+        )
+        self.assertEqual(status, 200, body)
+        payload = self.body_json(body)
+        self.assertEqual(payload["action"], "joined")
+        with self.server.app.lock:
+            targets = [d.target for d in self.server.app.registry.list()]
+            for device in self.server.app.registry.list():
+                self.server.app.registry.remove(device.id)
+        self.assertIn("192.168.1.42:5555", targets)
+
+    def test_12h_a_typed_address_is_held_to_the_same_guard(self):
+        csrf = self.sign_in()
+        for bad in (
+            "8.8.8.8",              # off the LAN
+            "127.0.0.1",            # loopback
+            "169.254.169.254",      # cloud metadata
+            "tv.local",             # hostname
+            "192.168.1.5; reboot",
+            "",
+        ):
+            status, _, body = self.post_json(
+                "/api/devices/add", {"host": bad, "port": "5555"}, csrf=csrf
+            )
+            self.assertEqual(status, 400, f"{bad}: {body}")
+            self.assertEqual(self.body_json(body)["error"], "bad_host", bad)
+
+    def test_12i_a_typed_port_must_be_an_adb_port(self):
+        csrf = self.sign_in()
+        status, _, body = self.post_json(
+            "/api/devices/add", {"host": "192.168.1.42", "port": "22"}, csrf=csrf
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(self.body_json(body)["error"], "bad_host")
+
+    def test_12j_pairing_rejects_an_address_outside_the_lan(self):
+        csrf = self.sign_in()
+        for bad in ("8.8.8.8:37831", "127.0.0.1:37831", "192.168.1.5", "192.168.1.5:80"):
+            status, _, body = self.post_json(
+                "/api/pair", {"pair_address": bad, "pairing_code": "123456"}, csrf=csrf
+            )
+            self.assertEqual(status, 400, f"{bad}: {body}")
+            self.assertEqual(self.body_json(body)["error"], "bad_pair_address", bad)
+
+    def test_12k_pairing_needs_a_code(self):
+        csrf = self.sign_in()
+        status, _, body = self.post_json(
+            "/api/pair", {"pair_address": "192.168.1.42:37831", "pairing_code": ""}, csrf=csrf
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(self.body_json(body)["error"], "bad_pair_code")
+
+    def test_12l_the_setup_page_offers_both_manual_paths(self):
+        self.sign_in()
+        _, _, page = self.get("/setup")
+        body = page.decode("utf-8")
+        self.assertIn('action="/api/devices/add"', body)
+        self.assertIn('action="/api/pair"', body)
+        self.assertIn("name=pair_address", body)
+        self.assertIn("name=pairing_code", body)
+
+    def test_12m_a_failed_form_post_lands_back_on_the_page_not_on_json(self):
+        """Regression: typing a bad address used to leave the browser on raw JSON."""
+        csrf = self.sign_in()
+        status, headers, _ = self.post_form(
+            "/api/devices/add", {"host": "8.8.8.8", "port": "5555", "csrf": csrf}
+        )
+        self.assertEqual(status, 303)
+        self.assertEqual(headers.get("Location"), "/setup?e=bad_host")
+        # and the page turns that code into a sentence it owns
+        _, _, page = self.get("/setup?e=bad_host")
+        self.assertIn(b"your own network", page)
+
+    def test_12n_a_crafted_notice_code_cannot_put_words_on_a_page(self):
+        self.sign_in()
+        _, _, page = self.get("/setup?e=%3Cscript%3Ealert(1)%3C/script%3E")
+        body = page.decode("utf-8")
+        self.assertNotIn("<script>alert", body)
+        self.assertNotIn("alert(1)", body)
+
     def test_13_an_unknown_endpoint_is_not_found(self):
         csrf = self.sign_in()
         status, _, body = self.post_json("/api/reboot", {}, csrf=csrf)

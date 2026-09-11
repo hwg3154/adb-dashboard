@@ -26,7 +26,11 @@ The product and security contract is [docs/design.md](docs/design.md). adb synta
 - A "Send to TV" text field for the focused input on the device.
 - A launcher: list launchable apps, launch, force stop, app info, clear data, uninstall.
 - One screenshot, on request. There is no stream and no screen view.
-- A first-run wizard that sweeps the LAN, pairs and connects.
+- A first-run wizard that sweeps the LAN, pairs and connects - or you can just type the TV's
+  IP address, which is the reliable path when the scan cannot see it (different subnet, TV
+  asleep, or a NATted container).
+- Connections look after themselves: adb forgets a device whenever it restarts, so every
+  command reconnects once and retries rather than making you re-pair.
 - The same page on a phone: the pad, the essential keys and quick launch come first and are
   sized for a thumb; the rest collapses. There is no separate mobile site.
 

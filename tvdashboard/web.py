@@ -144,6 +144,7 @@ def _route_settings(app: Application, request: security.Request, token: str) -> 
             app.csrf_for(token),
             catalog=app.prefs.catalog(),
             installed=app.installed,
+            notice=views.setup_notice(request.query.get("e", "")),
         )
 
 
@@ -151,7 +152,9 @@ def _route_setup(app: Application, request: security.Request, token: str) -> tup
     """The wizard lists whatever the last discovery run found. Discovery itself is a POST."""
     with app.lock:
         candidates = [item.public() for item in app.registry.candidates()]
-    return app.view.setup(candidates, app.csrf_for(token))
+    return app.view.setup(
+        candidates, app.csrf_for(token), views.setup_notice(request.query.get("e", ""))
+    )
 
 
 #: GET routes that need a session.

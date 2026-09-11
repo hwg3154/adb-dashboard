@@ -59,8 +59,9 @@ _FRAGMENT_FIELDS = {
     "index": frozenset({"notice", "keys", "quick", "text_field", "screenshot", "device"}),
     "apps": frozenset({"notice", "app_rows"}),
     "settings": frozenset({"notice", "device_rows", "password_form", "quick_launch"}),
+    # `notice` is filled from the same table `/setup` uses, so a TV added there can say so.
     "login": frozenset({"notice", "hint", "error"}),
-    "setup": frozenset({"notice", "candidate_rows"}),
+    "setup": frozenset({"notice", "candidate_rows", "manual_form", "pair_form"}),
 }
 
 #: The pad, drawn as it sits under a thumb: arrows around OK, and the four keys a remote puts
@@ -103,6 +104,28 @@ LOGIN_NOTICES: dict[str, tuple[str, str]] = {
     "not_initialized": ("error", "There is no account yet. Create the password below."),
     "signed_out": ("info", "Signed out."),
 }
+
+
+#: What `/setup?e=<code>` may say. Same contract as the sign-in table: the browser names a
+#: code, the words are chosen here, so a crafted link cannot put a sentence on the page.
+SETUP_NOTICES: dict[str, tuple[str, str]] = {
+    "joined": ("info", "TV added. It is connected and ready."),
+    "paired": ("info", "Paired. Now add the TV's own address to connect to it."),
+    "bad_host": ("error", "That is not an address this dashboard will use - it must be an IPv4 address on your own network."),
+    "bad_pair_address": ("error", "That pairing address does not look right. Copy the whole thing, including the port after the colon."),
+    "bad_pair_code": ("error", "Enter the six-digit code the TV is showing."),
+    "connect_failed": ("error", "The TV did not accept the connection. On Android 11 and newer, pair it first."),
+    "pairing_failed": ("error", "The TV rejected that pairing code. The code changes every time - reopen the pairing dialog and try the new one."),
+    "device_limit": ("error", "There is no room for another TV. Forget one in Settings first."),
+    "adb_missing": ("error", "adb is not installed where the dashboard is running."),
+    "discover_failed": ("error", "The network scan could not run."),
+}
+
+
+def setup_notice(code: object) -> str:
+    """Validate a `?e=` code against the setup table. Anything unknown becomes ''."""
+    candidate = code.strip().lower() if isinstance(code, str) else ""
+    return candidate if candidate in SETUP_NOTICES else ""
 
 
 def login_notice(code: object) -> str:
@@ -188,6 +211,7 @@ class View:
         csrf: str,
         catalog: list[dict[str, object]] | None = None,
         installed: object = None,
+        notice: str = "",
     ) -> tuple[int, str]:
         """Settings: the device list, the quick-launch checkboxes, and the password."""
         rows = [self._device_row(device, csrf) for device in reg.list_public()[:MAX_ROWS]]
@@ -196,6 +220,7 @@ class View:
             or '<p class=muted>No device is paired yet. Use <a href="/setup">Set up TV</a>.</p>',
             "quick_launch": self._quick_launch_choices(catalog, csrf, installed),
             "password_form": self._password_form(csrf),
+            "notice": _setup_banner(notice),
         }, csrf)
         return 200, self._wrap("Settings", body, csrf)
 
@@ -213,13 +238,23 @@ class View:
         }, csrf)
         return 200, self._wrap("Sign in", body, csrf)
 
-    def setup(self, candidates: list[dict[str, object]], csrf: str) -> tuple[int, str]:
-        """The wizard: candidates to pick, an optional pairing code, and nothing else."""
+    def setup(
+        self, candidates: list[dict[str, object]], csrf: str, notice: str = ""
+    ) -> tuple[int, str]:
+        """The wizard: what the sweep found, plus the two ways in that do not need a sweep.
+
+        Discovery cannot see every TV - a different subnet, a NATted container, a TV that was
+        asleep - so typing the address has to be a first-class path, not a fallback nobody
+        can reach.
+        """
         rows = [self._candidate_row(candidate, csrf) for candidate in candidates[:MAX_ROWS]]
         body = self._fill("setup", {
             "candidate_rows": "\n".join(item for item in rows if item)
-            or "<p class=muted>No device answered.</p>",
-        })
+            or "<p class=muted>No device answered. Add it by address below.</p>",
+            "manual_form": self._manual_form(csrf),
+            "pair_form": self._pair_form(csrf),
+            "notice": _setup_banner(notice),
+        }, csrf)
         return 200, self._wrap("Set up TV", body, csrf)
 
     # --------------------------------------------------------------------------- components
@@ -479,6 +514,48 @@ class View:
             "</li>"
         )
 
+    def _manual_form(self, csrf: str = "") -> str:
+        """Add a TV by address. The port list is the one the guard allows, so the browser
+        picks from it rather than typing a number we would only reject."""
+        options = "".join(
+            '<option value="' + render_attr(str(port)) + '">' + render_text(port) + "</option>"
+            for port in self.config.device_ports
+        )
+        return (
+            '<form method=post action="/api/devices/add" class="stack inline-form">'
+            + _csrf_input(csrf)
+            + '<label for=host>TV IP address</label>'
+            '<div class="field-row">'
+            '<input id=host name=host type=text inputmode=decimal autocomplete=off'
+            ' placeholder="192.168.1.42" maxlength=21 spellcheck=false>'
+            '<select name=port aria-label="adb port">' + options + "</select>"
+            "</div>"
+            "<button type=submit>Add TV</button>"
+            "</form>"
+        )
+
+    def _pair_form(self, csrf: str = "") -> str:
+        """Pair with an Android 11+ TV.
+
+        Two addresses, because the TV shows two: a throwaway one for pairing and the real one
+        for connecting. Asking for a single address is what makes this step fail silently.
+        """
+        return (
+            '<form method=post action="/api/pair" class="stack inline-form">'
+            + _csrf_input(csrf)
+            + '<label for=pair_address>Pairing address, from the TV</label>'
+            '<input id=pair_address name=pair_address type=text inputmode=decimal'
+            ' autocomplete=off placeholder="192.168.1.42:37831" maxlength=21 spellcheck=false>'
+            '<label for=pairing_code>Pairing code</label>'
+            '<input id=pairing_code name=pairing_code type=text inputmode=numeric'
+            ' autocomplete=off placeholder="123456" maxlength=10 spellcheck=false>'
+            '<label for=pair_host>TV address for connecting</label>'
+            '<input id=pair_host name=host type=text inputmode=decimal autocomplete=off'
+            ' placeholder="192.168.1.42:5555" maxlength=21 spellcheck=false>'
+            "<button type=submit>Pair and connect</button>"
+            "</form>"
+        )
+
     def _password_form(self, csrf: str = "") -> str:
         return (
             '<form method=post action="/api/change_password" class=stack>'
@@ -556,6 +633,17 @@ def _login_hint(first_run: bool) -> str:
     if first_run:
         return "Create the dashboard password. The TV does not ask for one."
     return "Sign in with the dashboard password, not the TV password."
+
+
+def _setup_banner(code: object) -> str:
+    """Render one notice on the setup page, from the table and never from the browser."""
+    notice = setup_notice(code)
+    if not notice:
+        return ""
+    tone, message = SETUP_NOTICES[notice]
+    return (
+        '<p class="banner ' + render_attr(tone) + '" role="status">' + render_text(message) + "</p>"
+    )
 
 
 def _login_banner(code: object) -> str:

@@ -136,8 +136,23 @@ Candidate verification is **not** a full adb handshake. The server opens a bare 
 candidate, then reads `ro.product.*` properties over an adb connection. A candidate that yields no
 properties is reported as "not a TV" and is not persisted.
 
-- Candidates are stored server-side in a short-lived TTL cache; the browser only ever sends an
-  opaque `candidate_id`, never a host or port.
+- Candidates are stored server-side in a short-lived TTL cache; the browser sends an opaque
+  `candidate_id`, never a host or port.
+- **Typing an address is a first-class path.** Discovery cannot see a TV on another subnet, a
+  TV that was asleep during the sweep, or anything at all from a NATted container, so
+  `/api/devices/add` accepts an address from the browser. This is the one place a host comes
+  from outside, and it is held to exactly the guard in §9: dotted IPv4, RFC1918 only, and a
+  configured adb port. It cannot be aimed at loopback, link-local or off the LAN.
+- **Pairing uses its own address.** Android 11+ shows a pairing address with a fresh random
+  port next to the six-digit code, and lists the connect address separately. They are asked
+  for separately because they are different: pairing against the connect port always fails.
+  The pairing port is therefore allowed to be any ephemeral port, while the host rule is
+  unchanged.
+- **A connection is not state we can persist.** It lives in the adb server, so it is gone
+  after a restart, a reboot, or a long enough sleep - while the pairing and the registry entry
+  are still perfectly good. Every device command therefore reconnects once if adb says the
+  device is not there, and retries. Only a connection failure is retried: a command the device
+  received and refused is never sent twice.
 - The registry is keyed by `host:port` with nickname, model and timestamps; only "Forget device"
   deletes an entry.
 - All state lives in `TVD_DATA_DIR` (default `/data`), directory `0700`, files `0600`,
@@ -167,6 +182,8 @@ JSON API (all `POST`, all JSON, fixed shape, size-capped):
 | `/api/screenshot` | `{}` | PNG as base64, truncated if oversized |
 | `/api/discover` | `{}` | candidate list (id/host/port/score) |
 | `/api/join` | `{"candidate_id": "...", "pairing_code": "..."}` | device joined |
+| `/api/devices/add` | `{"host": "...", "port": "..."}` | device added by typed address |
+| `/api/pair` | `{"pair_address": "...", "pairing_code": "...", "host": "..."}` | paired, then connected |
 | `/api/devices/{id}/connect` | `{}` | connected |
 | `/api/devices/{id}/disconnect` | `{}` | disconnected |
 | `/api/devices/{id}/forget` | `{}` | forgotten |
@@ -184,6 +201,9 @@ Rules for every endpoint:
 - `GET` is for HTML only; anything that can change device or app state is `POST`.
 - Error responses are stable codes (`bad_key`, `unauthorized`, `no_device`, `adb_missing`, …) and
   never echo user input or device strings back into HTML without escaping.
+- A form POST that fails lands back on the page it came from with `?e=<code>`; the page turns
+  the code into a sentence from a table it owns (`views.LOGIN_NOTICES`, `views.SETUP_NOTICES`),
+  so no handler and no crafted link can put words on a page. A `fetch()` caller still gets JSON.
 
 ## 8.1 Interfaces intentionally absent
 
@@ -223,9 +243,10 @@ Rules for every endpoint:
 
 These are product decisions, not bugs; do not "fix" them by weakening the checks above.
 
-- **Android 11+ refuses unpaired `adb connect`.** The wizard must run `adb pair` first, and the
-  TV's *Allow USB debugging* / wireless-debugging dialog must be accepted by someone physically at
-  the TV. There is no remote way to do this.
+- **Android 11+ refuses unpaired `adb connect`.** The wizard must run `adb pair` first, against
+  the *pairing* port the TV displays - not the connect port - and the code is regenerated every
+  time the dialog is opened. Someone has to be at the TV to read it. There is no remote way to
+  do this.
 - **`input text` is weak at IME.** No IME selection, poor non-Latin support; the TV keyboard
   handles those itself. Injected text does not survive fields that reject synthesized input.
 - **Injected keys are dropped** by permission, payment, 2FA and `filterTouchesWhenObserved`

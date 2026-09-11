@@ -178,6 +178,70 @@ class FakeAdb(unittest.TestCase):
         result = self.client.run(["-s", "192.168.1.5:5555", "shell", "getprop", "ro.product.model"])
         self.assertTrue(result.ok, result.stderr)
 
+    # ------------------------------------------------------------------- reconnecting
+
+    def _reconnecting_adb(self):
+        """A fake adb that refuses device commands until something connects first.
+
+        This is what a real adb server looks like after a restart: the device is still paired
+        and still in the registry, but the TCP connection is gone.
+        """
+        marker = self.dir / "connected"
+        script = (
+            "#!/usr/bin/env python3\n"
+            "import json, os, sys\n"
+            "argv = sys.argv[1:]\n"
+            "with open(os.environ['TVD_FAKE_LOG'], 'a') as h:\n"
+            "    h.write(json.dumps(argv) + '\\n')\n"
+            f"marker = {str(marker)!r}\n"
+            "if argv and argv[0] == 'connect':\n"
+            "    open(marker, 'w').close()\n"
+            "    sys.stdout.write('connected to ' + argv[1] + '\\n')\n"
+            "    sys.exit(0)\n"
+            "if argv and argv[0] == '-s' and not os.path.exists(marker):\n"
+            "    sys.stderr.write(\"adb: device '\" + argv[1] + \"' not found\\n\")\n"
+            "    sys.exit(1)\n"
+            "sys.exit(0)\n"
+        )
+        self.binary.write_text(script)
+        return marker
+
+    def test_a_dropped_device_reconnects_and_the_command_still_runs(self):
+        self._reconnecting_adb()
+        result = self.client.send_key("192.168.1.5:5555", "home")
+        self.assertTrue(result.ok, result.stderr)
+        verbs = [call[0] for call in self.calls()]
+        # Tried, found the connection gone, reconnected, tried again - and only once.
+        self.assertEqual(verbs, ["-s", "connect", "-s"])
+
+    def test_a_reconnect_is_attempted_once_and_not_in_a_loop(self):
+        # A fake that never lets the connection succeed must not spin.
+        self.binary.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os, sys\n"
+            "with open(os.environ['TVD_FAKE_LOG'], 'a') as h:\n"
+            "    h.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+            "sys.stderr.write('adb: device not found\\n')\n"
+            "sys.exit(1)\n"
+        )
+        result = self.client.send_key("192.168.1.5:5555", "home")
+        self.assertFalse(result.ok)
+        self.assertLessEqual(len(self.calls()), 2, self.calls())
+
+    def test_a_command_the_device_refused_is_not_retried(self):
+        # "not found" is a connection problem; anything else is the device's answer and
+        # running it a second time would be a second press.
+        os.environ["TVD_FAKE_RC"] = "1"
+        os.environ["TVD_FAKE_STDOUT"] = "Error: must be root\n"
+        result = self.client.send_key("192.168.1.5:5555", "home")
+        self.assertFalse(result.ok)
+        self.assertEqual(len(self.calls()), 1, self.calls())
+
+    def test_pairing_uses_the_pairing_port_it_was_given(self):
+        # Android 11+ hands out a random pairing port; pairing against 5555 never works.
+        self.client.pair("192.168.1.5", 37831, "123456")
+        self.assertEqual(self.last(), ["pair", "192.168.1.5:37831", "123456"])
+
     def test_a_missing_binary_raises_adb_error(self):
         client = adb.AdbClient("/nonexistent/adb")
         self.assertFalse(client.available())
