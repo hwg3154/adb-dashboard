@@ -142,6 +142,13 @@
     panel.addEventListener("click", function () {
       panel.focus();
     });
+    /* Arm the keyboard on load without letting the browser scroll the panel into view -
+       that used to jump the page past the quick-launch row every time it opened. */
+    try {
+      panel.focus({ preventScroll: true });
+    } catch (err) {
+      panel.focus();
+    }
     setActive(document.activeElement === panel);
   }
 
@@ -262,37 +269,6 @@
     if (!tile) return;
     if (!window.confirm(tile.getAttribute("data-confirm"))) event.preventDefault();
   });
-
-  /* ------------------------------------------------------------------ narrow screens */
-
-  /* The secondary key groups ship open, so a browser with this file blocked shows every key.
-     On a phone that is a very long page, so collapse them here - the pad, the essential row
-     and quick launch, which are what a phone is for, are never touched. */
-  (function collapseOnPhones() {
-    var groups = document.querySelectorAll("details.key-group");
-    if (!groups.length || !window.matchMedia) return;
-    var narrow = window.matchMedia("(max-width: 719px)");
-    var touched = false;
-    function apply() {
-      if (touched) return;
-      Array.prototype.forEach.call(groups, function (group) {
-        group.open = !narrow.matches;
-      });
-    }
-    Array.prototype.forEach.call(groups, function (group) {
-      /* Once the operator opens or closes one themselves, stop moving it under them.
-         A summary is opened by clicking it (Enter on a focused summary clicks it too), so
-         this is the honest signal - unlike `toggle`, which we fire ourselves. */
-      var summary = group.querySelector("summary");
-      if (summary) {
-        summary.addEventListener("click", function () {
-          touched = true;
-        });
-      }
-    });
-    apply();
-    if (narrow.addEventListener) narrow.addEventListener("change", apply);
-  })();
 
   /* ------------------------------------------------------------------ screenshot */
 

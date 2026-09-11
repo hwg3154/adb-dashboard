@@ -1,373 +1,473 @@
-/* Android TV Dashboard - one stylesheet, no build step, no CDN.
+/* tvdashboard - one stylesheet, no build step.
  *
- * Mobile first: the phone layout is the plain one and the desktop layout is the media query,
- * because the phone is the remote you actually pick up. Touch targets are 44px or larger,
- * the d-pad is a real pad rather than six buttons in a row, and nothing that matters is
- * behind a hover.
+ * The look is layered glass: a quiet tinted backdrop, translucent surfaces that pick up what
+ * is behind them, hairline edges catching a highlight along the top, and motion that settles
+ * rather than snaps.
+ *
+ * Two rules keep it honest:
+ *   1. Layout uses nothing exotic. Grid, flexbox and custom properties only, so the page is
+ *      still laid out correctly in an engine that has never heard of a backdrop filter.
+ *   2. Every glass effect sits behind @supports. Without it the surfaces are simply opaque,
+ *      which is a plainer page, not a broken one.
  */
 
+/* ------------------------------------------------------------------------------- tokens */
+
 :root {
-  --fg: #17202a;
-  --muted: #5b6472;
-  --line: #d6dbe1;
-  --bg: #f7f8fa;
-  --card: #ffffff;
-  --tile: #f0f3f7;
-  --tile-hover: #e3e9f1;
-  --accent: #0b6bcb;
-  --accent-fg: #ffffff;
-  --danger: #b3261e;
-  --ok: #1c7a4a;
-  --radius: 10px;
-  --tap: 46px;
+  color-scheme: light dark;
+
+  --bg: #eef1f6;
+  --bg-tint-a: rgba(90, 140, 255, 0.18);
+  --bg-tint-b: rgba(120, 210, 255, 0.16);
+  --bg-tint-c: rgba(180, 140, 255, 0.14);
+
+  /* Surfaces are colour + alpha so the backdrop shows through where blur is supported. */
+  --surface: rgba(255, 255, 255, 0.62);
+  --control: rgba(255, 255, 255, 0.55);
+  --control-hover: rgba(255, 255, 255, 0.85);
+  --control-active: rgba(255, 255, 255, 0.95);
+
+  --edge: rgba(255, 255, 255, 0.75);      /* the lit top edge of a pane */
+  --hairline: rgba(16, 24, 40, 0.10);     /* its outline */
+  --shadow: 0 1px 2px rgba(16, 24, 40, 0.05), 0 8px 24px rgba(16, 24, 40, 0.07);
+  --shadow-lift: 0 2px 6px rgba(16, 24, 40, 0.08), 0 14px 34px rgba(16, 24, 40, 0.12);
+
+  --fg: #10141c;
+  --muted: #5d6675;
+  --accent: #2f6bff;
+  --accent-fg: #fff;
+  --danger: #d2383c;
+  --ok: #1f9d6b;
+
+  --radius: 14px;
+  --radius-lg: 22px;
+  --radius-pill: 999px;
+  --tap: 44px;
+
+  --ease: cubic-bezier(0.22, 0.85, 0.28, 1);
+  --quick: 160ms var(--ease);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --fg: #e8ecf1;
-    --muted: #9aa4b2;
-    --line: #2b323c;
-    --bg: #12161c;
-    --card: #1a1f27;
-    --tile: #232a34;
-    --tile-hover: #2d3540;
-    --accent: #59a6ff;
-    --accent-fg: #0b1622;
-    --danger: #ff8a80;
-    --ok: #6ddba0;
+    --bg: #0a0c11;
+    --bg-tint-a: rgba(60, 110, 255, 0.22);
+    --bg-tint-b: rgba(40, 180, 230, 0.16);
+    --bg-tint-c: rgba(150, 90, 255, 0.18);
+
+    --surface: rgba(150, 165, 195, 0.10);
+    --control: rgba(160, 175, 205, 0.12);
+    --control-hover: rgba(170, 185, 215, 0.20);
+    --control-active: rgba(180, 195, 225, 0.28);
+
+    --edge: rgba(255, 255, 255, 0.14);
+    --hairline: rgba(255, 255, 255, 0.10);
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 10px 30px rgba(0, 0, 0, 0.45);
+    --shadow-lift: 0 2px 8px rgba(0, 0, 0, 0.4), 0 18px 44px rgba(0, 0, 0, 0.55);
+
+    --fg: #eef2f8;
+    --muted: #9aa5b8;
+    --accent: #5b8cff;
+    --accent-fg: #07101f;
+    --danger: #ff6b6f;
+    --ok: #3ddc9a;
   }
 }
 
+/* -------------------------------------------------------------------------------- page */
+
 * { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
 
 body {
   margin: 0;
+  min-height: 100vh;
   color: var(--fg);
-  background: var(--bg);
-  font: 15px/1.5 system-ui, -apple-system, 'Segoe UI', sans-serif;
-  -webkit-text-size-adjust: 100%;
+  background-color: var(--bg);
+  font: 15px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
 }
 
-/* ------------------------------------------------------------------------------ chrome */
+/* The light behind the glass. Fixed, so surfaces slide over it instead of with it. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background:
+    radial-gradient(58% 44% at 12% 4%, var(--bg-tint-a), transparent 62%),
+    radial-gradient(48% 38% at 92% 12%, var(--bg-tint-b), transparent 60%),
+    radial-gradient(62% 50% at 50% 104%, var(--bg-tint-c), transparent 64%);
+  pointer-events: none;
+}
+
+.page {
+  max-width: 940px;
+  margin: 0 auto;
+  padding: 20px 16px 56px;
+}
+
+/* ------------------------------------------------------------------------------ header */
 
 .bar {
   position: sticky;
   top: 0;
-  z-index: 5;
+  z-index: 20;
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
-  gap: 8px 16px;
-  padding: 10px 16px;
-  padding-top: max(10px, env(safe-area-inset-top));
-  background: var(--card);
-  border-bottom: 1px solid var(--line);
+  gap: 18px;
+  padding: 12px 20px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--hairline);
+  box-shadow: inset 0 1px 0 var(--edge);
 }
 
-.brand { font-weight: 600; text-decoration: none; color: var(--fg); flex: none; }
-/* Scoped to the bar: "nav" is a common word, and a key tile must never pick up page layout. */
-.bar .nav { display: flex; gap: 14px; flex-wrap: wrap; }
-.bar .nav a { color: var(--accent); text-decoration: none; padding: 4px 0; }
-.nav-on { font-weight: 600; }
+.brand { font-weight: 650; letter-spacing: -0.01em; text-decoration: none; color: var(--fg); }
+.nav { display: flex; gap: 16px; flex: 1; }
+.nav a { color: var(--muted); text-decoration: none; font-size: 14px; transition: color var(--quick); }
+.nav a:hover { color: var(--fg); }
+.nav .nav-on { color: var(--fg); font-weight: 600; }
 
 .state {
-  color: var(--muted);
   font-size: 13px;
+  color: var(--muted);
   font-variant-numeric: tabular-nums;
-  margin-left: auto;
-  flex: none;
+  transition: color var(--quick);
 }
+.state.on { color: var(--accent); font-weight: 600; }
+.state.error { color: var(--danger); }
 
-.state.on { color: var(--ok); font-weight: 600; }
-.state.error { color: var(--danger); font-weight: 600; }
-
-/* On a phone the bar is two rows - name and status, then the links - rather than three
-   wrapped fragments of one row. */
-@media (max-width: 519px) {
-  .bar { gap: 4px 10px; padding: 8px 12px; }
-  .bar .nav { order: 3; flex-basis: 100%; gap: 16px; font-size: 14px; }
-  .state { order: 2; }
-}
-
-.page {
-  max-width: 900px;
-  margin: 0 auto;
-  padding: 16px;
-  padding-bottom: max(16px, env(safe-area-inset-bottom));
-}
+/* ---------------------------------------------------------------------------- surfaces */
 
 .panel {
-  background: var(--card);
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 16px;
-  margin-bottom: 14px;
+  position: relative;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow), inset 0 1px 0 var(--edge);
+  padding: 20px;
+  margin-bottom: 16px;
 }
-.panel > h2, .panel-head h2 { font-size: 16px; margin: 0 0 10px; }
-.panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
-.panel-head h2 { margin-bottom: 10px; }
-.narrow { max-width: 420px; margin-inline: auto; }
-.muted { color: var(--muted); }
-.hint { font-size: 13px; margin-top: 0; }
+
+.panel > h2,
+.panel-head h2 {
+  font-size: 15px;
+  font-weight: 620;
+  letter-spacing: -0.01em;
+  margin: 0 0 14px;
+}
+.panel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.panel-head h2 { margin-bottom: 14px; }
+
+.narrow { max-width: 400px; margin: 8vh auto 0; }
+.muted { color: var(--muted); font-size: 14px; }
+.hint { font-size: 13px; margin: -6px 0 16px; color: var(--muted); }
 .small { font-size: 13px; color: var(--accent); text-decoration: none; }
+.small:hover { text-decoration: underline; }
 .error { color: var(--danger); }
 
 .banner {
-  margin: 0 0 12px;
-  padding: 10px 12px;
+  margin: 0 0 14px;
+  padding: 11px 14px;
   border-radius: var(--radius);
-  border: 1px solid var(--line);
+  border: 1px solid var(--hairline);
+  background: var(--control);
   font-size: 14px;
 }
-.banner.error { background: color-mix(in srgb, var(--danger) 12%, transparent); border-color: var(--danger); color: var(--fg); }
-.banner.info { background: color-mix(in srgb, var(--accent) 12%, transparent); border-color: var(--accent); }
-.banner.warn { background: color-mix(in srgb, var(--muted) 12%, transparent); color: var(--muted); }
+.banner.error { border-color: var(--danger); color: var(--danger); }
+.banner.info { border-color: var(--accent); color: var(--accent); }
+.banner.warn { color: var(--muted); }
 
 kbd {
   font: 12px/1 ui-monospace, SFMono-Regular, monospace;
-  padding: 3px 5px;
-  border: 1px solid var(--line);
-  border-bottom-width: 2px;
-  border-radius: 5px;
-  background: var(--tile);
+  padding: 3px 6px;
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  background: var(--control);
 }
 
-/* ------------------------------------------------------------------------------- forms */
+/* ------------------------------------------------------------------------------ controls */
 
-.stack { display: grid; gap: 8px; }
+.stack { display: grid; gap: 10px; }
 .stack label { font-size: 13px; color: var(--muted); }
 
-input[type=text], input[type=password] {
-  padding: 11px 12px;
-  border: 1px solid var(--line);
+input[type=text],
+input[type=password] {
+  width: 100%;
+  min-height: var(--tap);
+  padding: 12px 14px;
+  border: 1px solid var(--hairline);
   border-radius: var(--radius);
-  background: var(--card);
+  background: var(--control);
   color: var(--fg);
   font: inherit;
-  min-height: var(--tap);
-  width: 100%;
+  transition: border-color var(--quick), background var(--quick);
 }
+input::placeholder { color: var(--muted); }
+input:focus { outline: none; border-color: var(--accent); background: var(--control-hover); }
+input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 button {
   min-height: var(--tap);
-  padding: 10px 14px;
-  border: 1px solid var(--line);
+  padding: 11px 16px;
+  border: 1px solid var(--hairline);
   border-radius: var(--radius);
-  background: var(--tile);
+  background: var(--control);
   color: var(--fg);
   font: inherit;
+  font-weight: 500;
   cursor: pointer;
   touch-action: manipulation;
+  box-shadow: inset 0 1px 0 var(--edge);
+  transition: background var(--quick), transform var(--quick), box-shadow var(--quick);
 }
-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-button:hover { background: var(--tile-hover); }
-button:active { transform: translateY(1px); }
+button:hover { background: var(--control-hover); }
+/* Settling, not snapping: the press is a small compression that springs back. */
+button:active { transform: scale(0.965); background: var(--control-active); }
 button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-button[disabled] { opacity: .55; cursor: default; }
-.ghost { background: transparent; min-height: 36px; padding: 6px 10px; font-size: 13px; }
-.danger { color: var(--danger); }
-.signout { margin-top: 14px; }
-.signout button { max-width: 200px; }
+button[disabled] { opacity: 0.5; cursor: default; transform: none; }
 
-/* ------------------------------------------------------------------------------ remote */
-
-.remote { scroll-margin-top: 60px; }
-.remote:focus { outline: 2px solid var(--accent); outline-offset: 2px; }
-.remote:focus-visible { outline: 2px solid var(--accent); }
-
-#key-form { display: grid; gap: 12px; }
-
-/* The pad: arrows around OK, sized for a thumb and centred on a phone. */
-.pad {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-  width: 100%;
-  max-width: 276px;
-  margin: 0 auto;
+.ghost {
+  min-height: 34px;
+  padding: 6px 12px;
+  font-size: 13px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--muted);
 }
-.pad-gap { display: block; }
-.pad .tile {
+.ghost:hover { background: var(--control); color: var(--fg); }
+.danger { color: var(--danger); }
+.signout { margin-top: 18px; }
+.signout button { max-width: 190px; }
+
+/* -------------------------------------------------------------------------- quick launch */
+
+.quick-panel { padding-bottom: 20px; }
+
+.keys.apps-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 12px;
+}
+
+/* A tile with artwork is the artwork: the wordmark fills the face edge to edge and the
+   button's own surface never shows. Without artwork it is a plain glass tile with a name. */
+.tile.app {
   display: grid;
   place-items: center;
-  aspect-ratio: 1 / 1;
-  min-height: 56px;
-  padding: 4px;
-  font-size: 14px;
-  line-height: 1.2;
+  aspect-ratio: 16 / 10;
+  padding: 12px;
+  border-radius: var(--radius);
+  font-weight: 560;
+  overflow: hidden;
+  transition: transform var(--quick), box-shadow var(--quick), background var(--quick);
 }
-.pad .pad-corner { font-size: 13px; color: var(--muted); }
-.pad .pad-corner.g-system { color: var(--danger); }
-.pad .tile[value="dpad_center"] {
-  border-radius: 50%;
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--accent-fg);
-  font-weight: 600;
-}
-.pad .tile[value="dpad_center"]:hover { filter: brightness(1.08); }
+.tile.app:hover { transform: translateY(-2px); box-shadow: var(--shadow-lift), inset 0 1px 0 var(--edge); }
+.tile.app:active { transform: scale(0.97); }
 
-/* auto-fill, not auto-fit: an empty column stays empty instead of stretching one lonely
-   button across the panel. */
-.essentials {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
-  gap: 8px;
-  align-content: start;
-}
-.essentials .tile { white-space: nowrap; font-size: 14px; padding-inline: 8px; }
-
-.keys {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
-  gap: 8px;
-}
-.apps-grid { grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); }
-
-.tile { text-align: center; overflow-wrap: anywhere; }
-.tile.g-system { color: var(--danger); }
-.tile.app { font-weight: 600; }
-
-/* A quick-launch tile with artwork is the artwork: the wordmarks already carry the name, and
-   the supplied logos are dark plates, so the tile matches them rather than framing them. */
 .tile.app.art {
   padding: 0;
-  overflow: hidden;
-  background: #0b0e13;
-  border-color: #23293a;
-  aspect-ratio: 16 / 9;
-  display: grid;
-  place-items: stretch;
+  background: #05070b;
+  border-color: var(--hairline);
+  box-shadow: var(--shadow);
 }
 .tile.app.art .logo {
   display: block;
   width: 100%;
   height: 100%;
-  /* `contain` because a wordmark that gets cropped is a logo nobody recognises. */
-  object-fit: contain;
+  /* Cover, so the logo fills the button rather than floating in a letterboxed box. */
+  object-fit: cover;
   object-position: center;
+  transition: transform 320ms var(--ease);
 }
-.tile.app.art:hover { border-color: var(--accent); }
-/* The tile is the button, so the focus ring has to sit outside the clipped artwork. */
-.tile.app.art:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tile.app.art:hover .logo { transform: scale(1.04); }
 
-.key-group { border-top: 1px solid var(--line); padding-top: 10px; }
-.key-group > summary {
-  cursor: pointer;
+/* ---------------------------------------------------------------------------- the remote */
+
+.remote:focus { outline: none; }
+.remote:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+/* Focus is what arms the keyboard, so it needs to read at a glance, not only on :focus-visible. */
+.remote:focus-within { border-color: var(--accent); }
+
+#key-form { display: grid; gap: 14px; justify-items: center; }
+
+.pad {
+  display: grid;
+  grid-template-columns: repeat(3, 84px);
+  grid-auto-rows: 84px;
+  gap: 10px;
+  justify-content: center;
+}
+.pad .tile {
+  border-radius: 20px;
   font-size: 13px;
-  color: var(--muted);
-  padding: 6px 0;
-  list-style-position: inside;
+  padding: 4px;
 }
-.key-group > summary::marker { color: var(--line); }
-.key-group[open] > summary { margin-bottom: 8px; }
+/* OK is the centre of the pad and the most-pressed key on any remote. */
+.pad .pad-key[value="dpad_center"] {
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-weight: 650;
+  border-color: transparent;
+}
+.pad .pad-key[value="dpad_center"]:hover { background: var(--accent); filter: brightness(1.08); }
+.pad .pad-corner { color: var(--muted); font-size: 12px; }
+.pad .pad-corner:hover { color: var(--fg); }
+.pad-gap { display: block; }
 
-.send { margin-top: 4px; }
-.send button { justify-self: start; }
+.essentials,
+.keys {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
+  gap: 8px;
+  width: 100%;
+}
+.essentials { max-width: 460px; }
 
-/* ---------------------------------------------------------------------- quick launch */
+.tile {
+  text-align: center;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  padding: 10px 8px;
+}
+/* Power, Sleep and Wake stay legible but read as the keys you do not press by accident. */
+.tile.g-system { color: var(--danger); }
 
-.quick-panel { border-color: color-mix(in srgb, var(--accent) 35%, var(--line)); }
+.send { width: 100%; max-width: 560px; margin-top: 4px; }
 
-.choices { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; }
+/* -------------------------------------------------------------------------------- lists */
+
+ul { list-style: none; padding: 0; margin: 0; }
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--hairline);
+}
+.row:last-child { border-bottom: 0; }
+.pkg, .label, .model { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 13px; }
+.host, .score { color: var(--muted); font-size: 13px; }
+.actions { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; }
+.actions button { min-height: 36px; padding: 7px 12px; font-size: 13px; }
+.inline { display: inline; margin: 0; }
+
+.choices { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 8px; }
 .choice { margin: 0; }
 .choice .check {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   width: 100%;
   text-align: left;
   background: transparent;
+  box-shadow: none;
+  font-weight: 500;
 }
+.choice .check:hover { background: var(--control); }
 .choice .box {
   flex: none;
-  width: 22px;
-  height: 22px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
+  width: 21px;
+  height: 21px;
+  border: 1px solid var(--hairline);
+  border-radius: 7px;
   display: grid;
   place-items: center;
-  font-size: 14px;
+  font-size: 13px;
   line-height: 1;
-  background: var(--card);
+  background: var(--control);
+  transition: background var(--quick), border-color var(--quick);
 }
-.choice.on .check { background: var(--tile); border-color: var(--accent); }
-.choice.on .box { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+.choice.on .check { background: var(--control); border-color: var(--accent); }
+.choice.on .box { background: var(--accent); border-color: transparent; color: var(--accent-fg); }
 .choice .thumb {
   flex: none;
-  width: 44px;
+  width: 42px;
   height: 26px;
-  object-fit: contain;
-  border-radius: 4px;
-  background: #0b0e13;
+  object-fit: cover;
+  border-radius: 7px;
+  background: #05070b;
 }
-/* A row with no artwork keeps the same indent, so the names stay in one column. */
 .choice .thumb.none { background: transparent; }
 .choice .name { flex: 1; }
 .choice .pill {
   font-size: 11px;
   color: var(--ok);
   border: 1px solid currentColor;
-  border-radius: 999px;
-  padding: 1px 7px;
+  border-radius: var(--radius-pill);
+  padding: 2px 8px;
   white-space: nowrap;
-}
-
-/* --------------------------------------------------------------------------- listings */
-
-ul { list-style: none; padding: 0; margin: 0; }
-.row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  align-items: center;
-  padding: 12px 0;
-  border-bottom: 1px solid var(--line);
-}
-.row:last-child { border-bottom: 0; }
-.pkg, .label, .model { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 13px; }
-.host, .score, .kind { color: var(--muted); font-size: 13px; }
-.actions { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; }
-.actions button { min-height: 40px; padding: 8px 12px; font-size: 13px; }
-.inline { display: flex; gap: 6px; margin: 0; }
-.inline input[type=text] { width: auto; min-width: 0; flex: 1; min-height: 40px; padding: 6px 10px; }
-
-@media (max-width: 519px) {
-  .actions { margin-left: 0; width: 100%; }
-  .row .inline { flex: 1 1 auto; }
 }
 
 .screen {
   display: block;
   max-width: 100%;
   height: auto;
-  border: 1px solid var(--line);
+  border: 1px solid var(--hairline);
   border-radius: var(--radius);
-  margin-top: 10px;
 }
-.shot { margin-bottom: 4px; }
+.shot { margin-bottom: 12px; }
 
-details.panel > summary { cursor: pointer; list-style-position: inside; min-height: 24px; }
-details.panel > summary h2 { display: inline; font-size: 16px; }
-details.panel[open] > summary { margin-bottom: 8px; }
+details.panel > summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+details.panel > summary::-webkit-details-marker { display: none; }
+details.panel > summary h2 { margin: 0; }
+details.panel > summary::after {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-right: 1.5px solid var(--muted);
+  border-bottom: 1.5px solid var(--muted);
+  transform: rotate(45deg);
+  transition: transform var(--quick);
+}
+details.panel[open] > summary::after { transform: rotate(-135deg); }
+details.panel[open] > summary { margin-bottom: 14px; }
 
-/* ------------------------------------------------------------------------- wide screens */
+/* -------------------------------------------------------------------------------- glass */
 
-@media (min-width: 720px) {
-  #key-form { grid-template-columns: minmax(0, 276px) minmax(0, 1fr); align-items: start; }
-  .pad { grid-column: 1; margin: 0; }
-  .essentials { grid-column: 2; grid-template-columns: repeat(auto-fit, minmax(104px, 1fr)); }
-  .key-group { grid-column: 1 / -1; }
-  .send { grid-template-columns: auto 1fr auto; align-items: center; }
+/* Everything above works without this. This is the part that makes the surfaces read as
+   glass: they blur and saturate whatever sits behind them instead of just being tinted. */
+@supports (backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px)) {
+  .bar,
+  .panel,
+  button,
+  input[type=text],
+  input[type=password] {
+    -webkit-backdrop-filter: blur(22px) saturate(180%);
+    backdrop-filter: blur(22px) saturate(180%);
+  }
+  .bar {
+    -webkit-backdrop-filter: blur(28px) saturate(190%);
+    backdrop-filter: blur(28px) saturate(190%);
+  }
+  /* Artwork is opaque, so blurring behind it would only cost a layer. */
+  .tile.app.art { -webkit-backdrop-filter: none; backdrop-filter: none; }
 }
 
-/* A phone in landscape has almost no height: keep the pad reachable, shrink the rest. */
-@media (max-height: 460px) and (orientation: landscape) {
-  .pad { max-width: 240px; }
-  .pad .tile { min-height: 48px; }
-  .panel { padding: 12px; }
+/* ------------------------------------------------------------------------------- phones */
+
+@media (max-width: 560px) {
+  .page { padding: 14px 12px 40px; }
+  .panel { padding: 16px; border-radius: 20px; }
+  .bar { padding: 10px 14px; gap: 12px; }
+  .nav { gap: 12px; }
+  .keys.apps-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .pad { grid-template-columns: repeat(3, minmax(0, 1fr)); grid-auto-rows: auto; width: 100%; }
+  .pad .tile { aspect-ratio: 1 / 1; }
+  .essentials, .keys { grid-template-columns: repeat(auto-fit, minmax(78px, 1fr)); }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  button:active { transform: none; }
+  * { transition: none !important; animation: none !important; }
+  button:active, .tile.app:hover, .tile.app.art:hover .logo { transform: none; }
 }

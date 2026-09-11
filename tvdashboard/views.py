@@ -282,7 +282,13 @@ class View:
         return '<div class="essentials" role="group" aria-label="Essential keys">' + "".join(out) + "</div>"
 
     def _key_groups(self, by_alias: dict[str, object], placed: set[str]) -> str:
-        """Everything the pad and the essential row did not take, grouped and collapsed."""
+        """Everything the pad and the essential row did not take, in one flat grid.
+
+        No headings and no disclosure triangles: five labelled sections for twenty buttons is
+        more chrome than content, and a remote is easier to scan when it is one field of keys.
+        The `_GROUP_TITLES` order still decides the sequence, so related keys sit together
+        without needing a title to say so.
+        """
         buckets: dict[str, list[str]] = {}
         for alias, spec in by_alias.items():
             if alias in placed:
@@ -292,22 +298,14 @@ class View:
                 _key_button(spec)
             )
 
-        titles = list(_GROUP_TITLES) + [
-            (group, "More") for group in buckets if group not in dict(_GROUP_TITLES)
-        ]
-        sections: list[str] = []
-        for group, title in titles:
-            tiles = buckets.pop(group, [])
-            if not tiles:
-                continue
-            sections.append(
-                '<details class="key-group" open><summary>'
-                + render_text(title)
-                + '</summary><div class="keys">'
-                + "".join(tiles)
-                + "</div></details>"
-            )
-        return "".join(sections)
+        ordered: list[str] = []
+        for group, _title in _GROUP_TITLES:
+            ordered.extend(buckets.pop(group, []))
+        for remaining in buckets.values():
+            ordered.extend(remaining)
+        if not ordered:
+            return ""
+        return '<div class="keys rest" role="group" aria-label="More keys">' + "".join(ordered) + "</div>"
 
     def _quick_launch(self, tiles: list[dict[str, object]] | None, csrf: str = "") -> str:
         """Quick-launch tiles. The browser names a platform alias, never a package."""
