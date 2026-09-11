@@ -10,12 +10,19 @@ The product and security contract is [docs/design.md](docs/design.md). adb synta
 
 ## What it does
 
-- A remote: d-pad, Back/Home/Menu, channel, guide/info/captions, media, volume, power.
-  Keys are forwarded only while the remote panel has focus; `Esc` releases it.
+- A remote: a d-pad with Back, Home, Menu and Play in the corners, then volume and search, then
+  media / TV / power tucked into groups. Keys are forwarded only while the remote panel has
+  focus; `Esc` sends **Back**, and `Shift`+`Esc` (or the Release button) hands the keyboard back
+  to the page.
+- Quick launch: one tile per streaming service — Netflix, Disney+, Prime Video, YouTube and
+  HBO Max are on by default, and Settings has a checkbox for every app in the catalogue so the
+  ones you do not have never appear.
 - A "Send to TV" text field for the focused input on the device.
 - A launcher: list launchable apps, launch, force stop, app info, clear data, uninstall.
 - One screenshot, on request. There is no stream and no screen view.
 - A first-run wizard that sweeps the LAN, pairs and connects.
+- The same page on a phone: the pad, the essential keys and quick launch come first and are
+  sized for a thumb; the rest collapses. There is no separate mobile site.
 
 ## Run it
 
@@ -25,8 +32,9 @@ With Docker (see [docker-compose.yml](docker-compose.yml)):
 docker compose up --build
 ```
 
-Then open `http://<host>:8080` and create the operator password. There is no password reset:
-if it is lost, clear the data volume and start again.
+Then open `http://<host>:8080` and create the operator password. A wrong password comes back to
+the sign-in form with an error, so you can just try again. There is no password reset: if it is
+lost, clear the data volume and start again.
 
 Without Docker:
 
@@ -53,7 +61,7 @@ Environment only; there are no command-line options.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `TVD_DATA_DIR` | `/data` | state directory (accounts, sessions, device registry) |
+| `TVD_DATA_DIR` | `/data` | state directory (accounts, sessions, device registry, preferences) |
 | `TVD_HTTP_ADDR` | `0.0.0.0:8080` | listen address |
 | `TVD_ALLOW_INSECURE_HTTP` | unset | `1` = plain HTTP without the warning banner, and no `Secure` cookie |
 | `TVD_ALLOWED_CIDRS` | RFC1918 | comma-separated discovery/connect scope |
@@ -70,13 +78,17 @@ python3 -m unittest discover -s tests
 
 Three layers, no network and no device required:
 
-- `test_units.py` — keycode map, text sanitizer, RFC1918/loopback guard, candidate dedupe.
+- `test_units.py` — keycode map, text sanitizer, RFC1918/loopback guard, candidate dedupe, the
+  quick-launch catalogue and the preference file.
 - `test_contract.py` — a fake `adb` on disk that records argv, asserting the exact command shape
   and that no browser string is ever interpolated into one.
-- `test_http.py` — the real server on a loopback port: first run, sign-in, CSRF, cookies, the
-  origin checks, rate limiting, and the device paths against the fake adb.
+- `test_http.py` — the real server on a loopback port: first run, sign-in and the retry after a
+  wrong password, CSRF, cookies, the origin checks, rate limiting, quick launch, and the device
+  paths against the fake adb.
 
-Real TV behaviour is not covered and stays a manual checklist (design.md §12).
+Real TV behaviour is not covered and stays a manual checklist (design.md §12), as does anything
+that needs a browser: `Esc` reaching the TV as Back, `Shift`+`Esc` releasing, and the pages
+working with JavaScript switched off.
 
 ## Security posture in one paragraph
 

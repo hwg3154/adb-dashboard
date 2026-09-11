@@ -94,6 +94,27 @@ class FakeAdb(unittest.TestCase):
                 self.client.stop("192.168.1.5:5555", bad)
         self.assertEqual(self.calls(), [])
 
+    def test_a_quick_launch_alias_becomes_the_catalogued_package(self):
+        # The browser sends "netflix"; only the catalogue turns that into a package name, and
+        # the package still goes through the same validated launch path as any other app.
+        from tvdashboard import platforms
+
+        platform = platforms.resolve("netflix")
+        package = platforms.launch_candidates(platform)[0]
+        self.client.launch("192.168.1.5:5555", package)
+        argv = self.last()
+        self.assertEqual(argv[:4], ["-s", "192.168.1.5:5555", "shell", "monkey"])
+        self.assertIn("com.netflix.ninja", argv)
+        self.assertTrue(all("netflix" != item or item == "com.netflix.ninja" for item in argv))
+
+    def test_every_catalogued_package_survives_the_launch_path(self):
+        from tvdashboard import platforms
+
+        for entry in platforms.CATALOG.values():
+            for package in entry.packages:
+                self.client.launch("192.168.1.5:5555", package)
+                self.assertIn(package, self.last(), f"{entry.alias}: {package}")
+
     def test_an_off_lan_target_never_reaches_adb(self):
         for bad in ("8.8.8.8:5555", "127.0.0.1:5555", "169.254.169.254:5555"):
             with self.assertRaises(ValueError, msg=bad):

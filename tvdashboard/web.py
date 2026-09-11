@@ -27,6 +27,7 @@ from . import api, security, storage, views
 from .adb import AdbClient
 from .auth import AuthService
 from .config import COOKIE_NAME, Config
+from .prefs import Prefs
 from .registry import Registry
 from .sessions import SessionStore
 
@@ -76,8 +77,13 @@ class Application:
         self.sessions = SessionStore.load(config)
         self.auth = AuthService.load(config, self.sessions)
         self.registry = Registry.load(config)
+        self.prefs = Prefs.load(config)
         self.adb = AdbClient.from_config(config)
         self.view = views.View(config)
+        #: Packages the TV was last seen to have. A hint for picking between a streaming
+        #: service's several package names, never a permission check. Not persisted: it is
+        #: cheap to rebuild and wrong the moment someone installs something.
+        self.installed: frozenset[str] = frozenset()
 
     @property
     def is_initialized(self) -> bool:
@@ -85,6 +91,20 @@ class Application:
 
     def csrf_for(self, token: str) -> str:
         return self.sessions.csrf_for(token)
+
+    def note_installed(self, packages: object) -> None:
+        """Merge freshly-seen package names into the hint set. Never raises."""
+        if not isinstance(packages, (list, tuple, set, frozenset)):
+            return
+        seen = {
+            item.strip().lower()
+            for item in packages
+            if isinstance(item, str) and 0 < len(item) <= 128
+        }
+        if not seen:
+            return
+        with self.lock:
+            self.installed = frozenset(self.installed | seen)
 
 
 # --------------------------------------------------------------------------------- routing
@@ -98,7 +118,7 @@ def _page(handler: Callable[[Application, security.Request, str], tuple[int, str
 
 def _route_index(app: Application, request: security.Request, token: str) -> tuple[int, str]:
     with app.lock:
-        return app.view.index(app.registry, app.csrf_for(token))
+        return app.view.index(app.registry, app.csrf_for(token), tiles=app.prefs.tiles())
 
 
 def _route_apps(app: Application, request: security.Request, token: str) -> tuple[int, str]:
@@ -109,12 +129,18 @@ def _route_apps(app: Application, request: security.Request, token: str) -> tupl
             apps = app.adb.list_apps(target)
         except (ValueError, OSError, RuntimeError):
             apps = []
+    app.note_installed([item.get("package", "") for item in apps])
     return app.view.apps(apps, app.csrf_for(token))
 
 
 def _route_settings(app: Application, request: security.Request, token: str) -> tuple[int, str]:
     with app.lock:
-        return app.view.settings(app.registry, app.csrf_for(token))
+        return app.view.settings(
+            app.registry,
+            app.csrf_for(token),
+            catalog=app.prefs.catalog(),
+            installed=app.installed,
+        )
 
 
 def _route_setup(app: Application, request: security.Request, token: str) -> tuple[int, str]:
@@ -223,15 +249,20 @@ class Handler(BaseHTTPRequestHandler):
 
         token = security.authorize(app, request)
 
+        # `?e=` is how a failed POST hands the page a reason. It is a code from a fixed set,
+        # never a message: the words are chosen in `views`, so nothing a browser sends can
+        # put a sentence on the sign-in page.
+        notice = views.login_notice(request.query.get("e", ""))
+
         # Before an account exists there is exactly one thing to do, and one page to do it on.
         if not app.is_initialized:
             if path == "/login":
-                return self._write_page(*app.view.login("", first_run=True))
+                return self._write_page(*app.view.login("", first_run=True, notice=notice))
             return self._redirect("/login")
 
         if not token:
             if path == "/login":
-                return self._write_page(*app.view.login(""))
+                return self._write_page(*app.view.login("", notice=notice))
             return self._redirect("/login")
 
         if path == "/login":

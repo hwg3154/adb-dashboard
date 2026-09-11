@@ -1,9 +1,10 @@
 /* Android TV Dashboard - client.
  *
- * Three jobs, and nothing else:
+ * Four jobs, and nothing else:
  *   1. forward keys to the TV, but only while the remote panel has focus (design.md §4)
  *   2. turn the plain <form> POSTs into fetch() calls so a key press does not reload the page
  *   3. confirm the destructive actions, and fetch a screenshot on request
+ *   4. flip a quick-launch checkbox without a page reload
  *
  * Every page still works with this file blocked: the forms POST normally and the server
  * redirects back. Nothing here decides what is allowed - the server re-checks every request.
@@ -15,15 +16,21 @@
   var HEADER = "X-TVD-CSRF";
   var state = document.getElementById("remote-state");
   var panel = document.getElementById("remote-panel");
+  var release = document.getElementById("remote-release");
 
   /* The browser key names we forward, mapped to the server's aliases. Anything not in this
-     map is left to the page, so Tab, F5 and the browser's own shortcuts still work. */
+     map is left to the page, so Tab, F5 and the browser's own shortcuts still work.
+
+     Escape is Back, because that is what the key means on a remote. Letting go of the
+     keyboard is Shift+Esc, handled before this map is consulted. */
   var KEYS = {
     ArrowUp: "dpad_up",
     ArrowDown: "dpad_down",
     ArrowLeft: "dpad_left",
     ArrowRight: "dpad_right",
     Enter: "dpad_center",
+    Escape: "back",
+    Esc: "back",
     " ": "play_pause",
     Backspace: "back",
     Home: "home",
@@ -39,18 +46,25 @@
     AudioVolumeMute: "volume_mute"
   };
 
+  /* Forms that move the browser themselves (cookies, redirects). Left to post normally. */
+  var NATIVE_FORMS = { "/api/login": true, "/api/change_password": true, "/api/logout": true };
+
   var active = false;
   var busy = false;
 
   function say(message, isError) {
     if (!state) return;
     state.textContent = message;
-    state.classList.toggle("on", !!active);
+    state.classList.toggle("on", !!active && !isError);
     state.classList.toggle("error", !!isError);
   }
 
   function setActive(on) {
     active = !!on;
+    /* The button is always there once this file runs - only its label changes. Hiding it on
+       blur would make it vanish under the pointer between mousedown and click, which is a
+       button that can never be pressed. */
+    if (release) release.textContent = active ? "Release keyboard" : "Use keyboard";
     say(active ? "Remote: active" : "Remote: idle", false);
   }
 
@@ -101,6 +115,7 @@
     bad_key: "That key is not on the remote.",
     bad_text: "Nothing safe to send in that text.",
     bad_package: "That app name is not valid.",
+    bad_platform: "That app is not in the quick-launch list.",
     connect_failed: "Could not connect to the TV.",
     pairing_failed: "The TV rejected that pairing code.",
     offline: "The dashboard is unreachable."
@@ -130,19 +145,43 @@
     setActive(document.activeElement === panel);
   }
 
+  if (release) {
+    /* Without this the button steals focus from the panel on mousedown, so by the time the
+       click arrives the remote is already idle and the toggle reads the wrong state. */
+    release.addEventListener("mousedown", function (event) {
+      event.preventDefault();
+    });
+    release.addEventListener("click", function (event) {
+      event.stopPropagation();
+      if (!panel) return;
+      if (active) {
+        panel.blur();
+        setActive(false);
+      } else {
+        panel.focus();
+      }
+    });
+    release.hidden = false;
+  }
+
   document.addEventListener("keydown", function (event) {
     if (!active) return;
-    /* Esc releases the panel. It is never forwarded: design.md §4 makes it the way out. */
-    if (event.key === "Escape") {
+
+    /* Typing into a field of our own is typing, not remote control. */
+    var tag = (event.target && event.target.tagName) || "";
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+
+    /* Shift+Esc is the way out: it hands the keyboard back to the page and is never
+       forwarded. Esc on its own is Back, which is what a remote does with it. */
+    if ((event.key === "Escape" || event.key === "Esc") && event.shiftKey) {
       if (panel) panel.blur();
       setActive(false);
       event.preventDefault();
       return;
     }
-    /* Typing into a field of our own is typing, not remote control. */
-    var tag = (event.target && event.target.tagName) || "";
-    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+
     if (event.ctrlKey || event.metaKey || event.altKey) return;
+    if (event.shiftKey && event.key.length === 1) return;
 
     var alias = KEYS[event.key];
     if (!alias) return;
@@ -159,8 +198,7 @@
     if (!form || form.method.toLowerCase() !== "post") return;
     var action = form.getAttribute("action") || "";
     if (action.indexOf("/api/") !== 0) return;
-    /* Sign-in and password changes set a cookie and move the browser; let them post normally. */
-    if (action === "/api/login" || action === "/api/change_password") return;
+    if (NATIVE_FORMS[action]) return;
 
     var confirmText = form.getAttribute("data-confirm");
     if (confirmText && !window.confirm(confirmText)) {
@@ -179,10 +217,20 @@
     if (submitter && submitter.name) body[submitter.name] = submitter.value;
 
     post(action, body).then(function (payload) {
-      if (!report(payload, "Done")) return;
+      if (!report(payload, doneMessage(action, body))) return;
+      if (action === "/api/prefs/quick_launch") {
+        flipChoice(form);
+        return;
+      }
       if (RELOAD_AFTER[action]) window.location.reload();
     });
   });
+
+  function doneMessage(action, body) {
+    if (action === "/api/quick_launch") return "Launched " + (body.platform || "app");
+    if (action === "/api/prefs/quick_launch") return "Saved";
+    return "Done";
+  }
 
   /* Actions that change what the page is showing. */
   var RELOAD_AFTER = {
@@ -194,12 +242,57 @@
     "/api/devices/set_nickname": true
   };
 
+  /* A quick-launch checkbox: the server stored the new state, so flip the row to match
+     rather than reloading a settings page the operator is halfway through. */
+  function flipChoice(form) {
+    var field = form.querySelector('input[name="on"]');
+    var button = form.querySelector("button.check");
+    var box = form.querySelector(".box");
+    if (!field) return;
+    var nowOn = field.value === "1";
+    field.value = nowOn ? "0" : "1";
+    form.classList.toggle("on", nowOn);
+    if (box) box.innerHTML = nowOn ? "&#10003;" : "";
+    if (button) button.setAttribute("aria-checked", nowOn ? "true" : "false");
+  }
+
   /* A tile carrying data-confirm is a destructive key (Power, Sleep). */
   document.addEventListener("click", function (event) {
     var tile = event.target.closest && event.target.closest(".tile[data-confirm]");
     if (!tile) return;
     if (!window.confirm(tile.getAttribute("data-confirm"))) event.preventDefault();
   });
+
+  /* ------------------------------------------------------------------ narrow screens */
+
+  /* The secondary key groups ship open, so a browser with this file blocked shows every key.
+     On a phone that is a very long page, so collapse them here - the pad, the essential row
+     and quick launch, which are what a phone is for, are never touched. */
+  (function collapseOnPhones() {
+    var groups = document.querySelectorAll("details.key-group");
+    if (!groups.length || !window.matchMedia) return;
+    var narrow = window.matchMedia("(max-width: 719px)");
+    var touched = false;
+    function apply() {
+      if (touched) return;
+      Array.prototype.forEach.call(groups, function (group) {
+        group.open = !narrow.matches;
+      });
+    }
+    Array.prototype.forEach.call(groups, function (group) {
+      /* Once the operator opens or closes one themselves, stop moving it under them.
+         A summary is opened by clicking it (Enter on a focused summary clicks it too), so
+         this is the honest signal - unlike `toggle`, which we fire ourselves. */
+      var summary = group.querySelector("summary");
+      if (summary) {
+        summary.addEventListener("click", function () {
+          touched = true;
+        });
+      }
+    });
+    apply();
+    if (narrow.addEventListener) narrow.addEventListener("change", apply);
+  })();
 
   /* ------------------------------------------------------------------ screenshot */
 

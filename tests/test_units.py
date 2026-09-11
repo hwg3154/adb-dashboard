@@ -1,12 +1,13 @@
 """Unit tests for the pieces design.md §12 names: keycode map, text sanitizer, argv builder,
-the RFC1918/loopback guard, and candidate dedupe."""
+the RFC1918/loopback guard, candidate dedupe, and the quick-launch catalogue."""
 
 from __future__ import annotations
 
+import re
 import tempfile
 import unittest
 
-from tvdashboard import keys, netguard, registry, textentry
+from tvdashboard import adb, api, keys, netguard, platforms, prefs, registry, textentry, views
 from tvdashboard.config import DEFAULT_ALLOWED_CIDRS, DEVICE_PORTS, Config
 
 
@@ -36,9 +37,11 @@ class KeycodeMap(unittest.TestCase):
         for alias in ("power", "sleep"):
             self.assertTrue(keys.KEY_ALIASES[alias].is_destructive)
 
-    def test_escape_is_not_forwarded(self):
-        # design.md §4: Esc releases the panel; it must not reach the TV as Back.
-        self.assertNotIn("escape", keys.KEYBOARD_ALIASES)
+    def test_escape_is_the_back_key(self):
+        # design.md §4: Esc is Back, the way it is on a remote. Shift+Esc releases the panel,
+        # and the client never sends that combination, so it has no alias here.
+        for name in ("escape", "esc"):
+            self.assertEqual(keys.resolve_key(name).keycode, "KEYCODE_BACK")
 
 
 class TextSanitizer(unittest.TestCase):
@@ -157,6 +160,102 @@ class CandidateCache(unittest.TestCase):
         ids = {registry.new_device_id() for _ in range(200)}
         self.assertEqual(len(ids), 200)
         self.assertTrue(all(len(item) == 32 for item in ids))
+
+
+class PlatformCatalog(unittest.TestCase):
+    """The quick-launch catalogue is data, and it has to keep the same promises as the code."""
+
+    def test_every_package_is_one_adb_would_accept(self):
+        # adb.py has its own package pattern; a catalogue entry that cannot pass it is a tile
+        # that fails at the last moment, on the TV, for no reason the operator can see.
+        pattern = re.compile(adb._PACKAGE_RE.pattern)  # noqa: SLF001 - that is the contract
+        for platform in platforms.CATALOG.values():
+            self.assertTrue(platform.packages, platform.alias)
+            for package in platform.packages:
+                self.assertRegex(package, pattern, f"{platform.alias}: {package}")
+
+    def test_aliases_are_short_opaque_names(self):
+        for alias, platform in platforms.CATALOG.items():
+            self.assertEqual(alias, platform.alias)
+            self.assertRegex(alias, platforms.ALIAS_RE)
+
+    def test_the_defaults_are_the_five_that_were_asked_for(self):
+        self.assertEqual(
+            set(platforms.DEFAULT_ALIASES),
+            {"netflix", "disney", "prime_video", "youtube", "hbo_max"},
+        )
+
+    def test_an_unknown_alias_is_not_a_platform(self):
+        for bad in ("", "  ", "netflix; reboot", "../etc", "com.netflix.ninja", None, 7):
+            self.assertEqual(platforms.clean_alias(bad), "")
+            with self.assertRaises(platforms.UnknownPlatform):
+                platforms.resolve(bad)
+
+    def test_a_known_installed_package_wins_over_catalogue_order(self):
+        platform = platforms.CATALOG["netflix"]
+        self.assertEqual(
+            platforms.launch_candidates(platform, {"com.netflix.mediaclient"}),
+            ("com.netflix.mediaclient",),
+        )
+
+    def test_with_nothing_known_the_candidates_stay_in_order_and_bounded(self):
+        platform = platforms.CATALOG["netflix"]
+        candidates = platforms.launch_candidates(platform, frozenset())
+        self.assertEqual(candidates[0], "com.netflix.ninja")
+        self.assertLessEqual(len(candidates), platforms.MAX_LAUNCH_ATTEMPTS)
+
+
+class QuickLaunchPrefs(unittest.TestCase):
+    def setUp(self):
+        self.config = _config()
+        self.prefs = prefs.Prefs.load(self.config)
+
+    def test_a_fresh_install_shows_the_defaults(self):
+        self.assertEqual(self.prefs.quick_launch, tuple(platforms.DEFAULT_ALIASES))
+
+    def test_a_choice_survives_a_reload(self):
+        self.prefs.toggle_quick_launch("netflix", False)
+        self.prefs.toggle_quick_launch("kodi", True)
+        reloaded = prefs.Prefs.load(self.config)
+        self.assertNotIn("netflix", reloaded.quick_launch)
+        self.assertIn("kodi", reloaded.quick_launch)
+
+    def test_the_stored_file_can_only_hold_catalogue_aliases(self):
+        # A hand-edited file must not be able to introduce a package name or a shell word.
+        self.prefs.set_quick_launch(["netflix", "not_a_platform", "com.evil.app", "", None])
+        self.assertEqual(self.prefs.quick_launch, ("netflix",))
+
+    def test_an_unknown_alias_cannot_be_toggled(self):
+        with self.assertRaises(platforms.UnknownPlatform):
+            self.prefs.toggle_quick_launch("not_a_platform", True)
+
+    def test_tiles_are_drawn_in_catalogue_order_however_they_were_added(self):
+        self.prefs.set_quick_launch(["kodi", "netflix", "disney"])
+        self.assertEqual([tile["alias"] for tile in self.prefs.tiles()], ["netflix", "disney", "kodi"])
+
+    def test_the_settings_list_always_offers_everything(self):
+        self.prefs.set_quick_launch([])
+        catalog = self.prefs.catalog()
+        self.assertEqual(len(catalog), len(platforms.CATALOG))
+        self.assertTrue(all(item["on"] is False for item in catalog))
+
+
+class LoginNotices(unittest.TestCase):
+    """`?e=` is a contract between api (which redirects) and views (which chooses the words)."""
+
+    def test_the_two_halves_agree(self):
+        self.assertEqual(api._LOGIN_NOTICE_CODES, frozenset(views.LOGIN_NOTICES))  # noqa: SLF001
+
+    def test_an_invented_code_says_nothing(self):
+        for bad in ("", "boom", "<script>", "bad_credentials!", None, 7):
+            self.assertEqual(views.login_notice(bad), "")
+        # Surrounding space is normalized away, not treated as a different code.
+        self.assertEqual(views.login_notice(" bad_credentials "), "bad_credentials")
+
+    def test_a_real_code_never_reflects_browser_text(self):
+        for code, (tone, message) in views.LOGIN_NOTICES.items():
+            self.assertIn(tone, {"error", "info"})
+            self.assertTrue(message and "<" not in message, code)
 
 
 if __name__ == "__main__":

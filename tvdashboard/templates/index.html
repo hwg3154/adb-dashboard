@@ -1,18 +1,26 @@
+<section class="panel quick-panel">
+<div class="panel-head"><h2>Quick launch</h2><a class="small" href="/settings">Choose apps</a></div>
+$quick
+</section>
 <section class="panel remote" id="remote-panel" tabindex="0" aria-label="TV remote" autofocus>
+<div class="panel-head">
 <h2>Remote</h2>
-<p class="muted">Click the remote, then use the keyboard. Esc returns control to this page.</p>
+<button type="button" class="ghost" id="remote-release" hidden>Release keyboard</button>
+</div>
+<p class="muted hint">Click the remote, then use the keyboard. <kbd>Esc</kbd> sends Back;
+<kbd>Shift</kbd>+<kbd>Esc</kbd> hands the keyboard back to this page.</p>
 <form id="key-form" method="post" action="/api/key">
-$tiles
+$keys
 </form>
-<form id="text-form" class="stack" method="post" action="/api/text">
+<form id="text-form" class="stack send" method="post" action="/api/text">
 $text_field
 </form>
-<div class="panel">
-<h2>Screen</h2>
+</section>
+<details class="panel">
+<summary><h2>Screen</h2></summary>
 $screenshot
-</div>
-<section class="panel">
-<h2>Devices</h2>
+</details>
+<details class="panel">
+<summary><h2>Devices</h2></summary>
 $device
-</section>
-</section>
+</details>

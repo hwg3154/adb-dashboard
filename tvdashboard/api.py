@@ -21,7 +21,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
-from . import discovery, keys, netguard, security, textentry
+from . import discovery, keys, netguard, platforms, security, textentry
 from .adb import AdbError, AdbResult
 from .auth import AuthError
 from .registry import RegistryError
@@ -41,11 +41,19 @@ _DEVICE_FORM_PATH = re.compile(r"^/api/devices/([a-z_]{3,16})$")
 #: Where a form POST lands when it succeeds. `fetch()` callers ignore this.
 _FORM_REDIRECT = {
     "/api/login": "/",
-    "/api/logout": "/login",
+    "/api/logout": "/login?e=signed_out",
     "/api/change_password": "/settings",
     "/api/join": "/settings",
     "/api/discover": "/setup",
+    "/api/prefs/quick_launch": "/settings",
 }
+
+#: Failure codes a browser may be sent back to `/login` with. The page turns one of these into
+#: a sentence; anything else becomes the generic one, so no handler can put a string on a page
+#: by naming it here. `views.LOGIN_NOTICES` is the other half of this contract.
+_LOGIN_NOTICE_CODES = frozenset(
+    {"bad_credentials", "locked", "weak_password", "bad_request", "not_initialized", "signed_out"}
+)
 
 
 @dataclass
@@ -169,7 +177,12 @@ def _device_action(path: str) -> tuple[str, str] | None:
 
 
 def _login(app: object, request: Request, token: str, ip: str) -> Result:
-    """Sign in, or create the one account when there is none yet (design.md §7)."""
+    """Sign in, or create the one account when there is none yet (design.md §7).
+
+    A wrong password is a normal thing to do, so it has to end somewhere you can type again.
+    A form POST is sent back to `/login` with a code the page can explain; a `fetch()` caller
+    still gets the same JSON it always did.
+    """
     username = request.text("username")
     password = request.text("password")
     try:
@@ -178,13 +191,25 @@ def _login(app: object, request: Request, token: str, ip: str) -> Result:
         else:
             opened = app.auth.login(username, password, ip)
     except AuthError as exc:
-        return Result(_auth_status(exc.code), exc.as_dict())
+        return _login_failed(request, exc.code, _auth_status(exc.code), exc.retry_after)
     except (ValueError, RegistryError):
-        return fail("bad_request")
+        return _login_failed(request, "bad_request", 400)
 
     new_token = opened.get("token", "")
     result = ok(action=opened.get("action", "session_opened"))
     result.set_cookie = new_token if isinstance(new_token, str) else ""
+    return result
+
+
+def _login_failed(request: Request, code: str, status: int, retry_after: int = 0) -> Result:
+    """A failed sign-in. JSON for a script, and another try for a browser."""
+    payload: dict[str, object] = {"ok": False, "error": code}
+    if retry_after:
+        payload["retry_after"] = int(retry_after)
+    result = Result(status, payload)
+    if _is_form(request):
+        notice = code if code in _LOGIN_NOTICE_CODES else "bad_request"
+        result.redirect = "/login?e=" + notice
     return result
 
 
@@ -287,6 +312,7 @@ def _apps(app: object, request: Request, token: str, ip: str) -> Result:
         return fail("adb_missing", 503)
     except ValueError:
         return fail("bad_target")
+    _remember_installed(app, [item.get("package", "") for item in listed])
     return ok(apps=listed, count=len(listed))
 
 
@@ -315,6 +341,56 @@ def _launch(app: object, request: Request, token: str, ip: str) -> Result:
         return fail("bad_package")
     activity = request.text("activity")
     return _adb(lambda: app.adb.launch(target, package, activity), package=package)
+
+
+# ---------------------------------------------------------------------------- quick launch
+
+
+def _quick_launch(app: object, request: Request, token: str, ip: str) -> Result:
+    """Launch one catalogued streaming app by alias.
+
+    The browser sends `netflix`, never a package: `platforms` owns the mapping. A service can
+    ship under more than one package name, so a candidate the device does not have is followed
+    by the next one rather than reported as a failure.
+    """
+    # An alias we do not know is refused before any device lookup, the same way an unknown key
+    # is: a typo in the browser is not a reason to go and ask the TV anything.
+    try:
+        platform = platforms.resolve(request.text("platform"))
+    except platforms.UnknownPlatform:
+        return fail("bad_platform")
+
+    candidates = platforms.launch_candidates(platform, _installed(app))
+    if not candidates:
+        return fail("bad_platform")
+
+    target = _target(app)
+    if not target:
+        return fail("no_device", 409)
+
+    attempt = fail("adb_failed", 502)
+    for package in candidates:
+        attempt = _adb(
+            lambda pkg=package: app.adb.launch(target, pkg),
+            platform=platform.alias,
+            label=platform.label,
+        )
+        if attempt.status == 200:
+            _remember_installed(app, [package])
+            return attempt
+        # adb itself being gone is not something the next package can fix.
+        if attempt.payload.get("error") == "adb_missing":
+            return attempt
+    return attempt
+
+
+def _prefs_quick_launch(app: object, request: Request, token: str, ip: str) -> Result:
+    """Show or hide one quick-launch tile. The choice is the operator's and it is persisted."""
+    try:
+        enabled = app.prefs.toggle_quick_launch(request.text("alias"), request.flag("on"))
+    except platforms.UnknownPlatform:
+        return fail("bad_platform")
+    return ok(action="quick_launch_updated", quick_launch=list(enabled))
 
 
 # --------------------------------------------------------------------------------- devices
@@ -428,6 +504,23 @@ def _target(app: object) -> str:
         return app.registry.active_target()
 
 
+def _installed(app: object) -> frozenset[str]:
+    """Packages the device was last seen to have, or an empty set when nobody has looked.
+
+    This is a hint for choosing between a service's package names, never a gate: an app that
+    is not in it is still launched, because the list may simply be stale.
+    """
+    seen = getattr(app, "installed", None)
+    return frozenset(seen) if isinstance(seen, (set, frozenset)) else frozenset()
+
+
+def _remember_installed(app: object, packages: object) -> None:
+    """Record what the device answered with. Best effort; a failure here changes nothing."""
+    note = getattr(app, "note_installed", None)
+    if callable(note):
+        note(packages)
+
+
 def _adb(call: Callable[[], AdbResult], **fields: object) -> Result:
     """Run one adb call and turn its outcome into a stable code.
 
@@ -462,6 +555,8 @@ _ROUTES: dict[str, Callable[[object, Request, str, str], Result]] = {
     "/api/screenshot": _screenshot,
     "/api/apps": _apps,
     "/api/launch": _launch,
+    "/api/quick_launch": _quick_launch,
+    "/api/prefs/quick_launch": _prefs_quick_launch,
     "/api/stop": _app_action("stop"),
     "/api/appinfo": _app_action("app_info"),
     "/api/clear": _app_action("clear_data"),

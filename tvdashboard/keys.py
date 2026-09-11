@@ -82,6 +82,10 @@ KEYBOARD_ALIASES: dict[str, str] = {
     "enter": "enter",
     " ": "dpad_center",
     "backspace": "back",
+    # Esc is Back, because that is what it means on every other remote in the room.
+    # Releasing the keyboard is Shift+Esc, which the client handles before it gets here.
+    "escape": "back",
+    "esc": "back",
     "contextmenu": "menu",
     "mediatrack": "content",
     "channelup": "channel_up",

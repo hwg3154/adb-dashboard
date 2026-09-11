@@ -293,6 +293,23 @@ class Live(_Base):
         self.assertNotIn("no-referrer", policy)
         self.assertEqual(policy, "same-origin")
 
+    def test_12e_every_form_on_a_page_carries_a_real_csrf_token(self):
+        """A form rendered with an empty token is a button that always fails.
+
+        Regression: the Sign out form on /settings used `$csrf`, but settings() did not pass
+        the token down to _fill, so it rendered value="" next to a password form that had one.
+        """
+        import re as _re
+
+        self.sign_in()
+        for path in ("/", "/apps", "/settings", "/setup"):
+            _, _, page = self.get(path)
+            body = page.decode("utf-8")
+            for match in _re.finditer(r'name="csrf" value="([0-9a-f]*)"', body):
+                self.assertRegex(
+                    match.group(1), r"^[0-9a-f]{64}$", f"empty/short csrf on {path}"
+                )
+
     def test_13_an_unknown_endpoint_is_not_found(self):
         csrf = self.sign_in()
         status, _, body = self.post_json("/api/reboot", {}, csrf=csrf)
@@ -302,7 +319,53 @@ class Live(_Base):
         csrf = self.sign_in()
         status, headers, _ = self.post_form("/api/logout", {"csrf": csrf})
         self.assertEqual(status, 303)
-        self.assertEqual(headers.get("Location"), "/login")
+        # The page it lands on says what happened, rather than looking like a failed sign-in.
+        self.assertEqual(headers.get("Location"), "/login?e=signed_out")
+
+    def test_14b_a_wrong_password_sends_the_browser_back_to_a_usable_form(self):
+        """v1: a failed sign-in used to end on a page of JSON with no way back."""
+        self.sign_in()  # make sure the account exists
+        self.jar.clear()
+        status, headers, body = self.post_form(
+            "/api/login", {"username": "operator", "password": "not-the-password"}
+        )
+        self.assertEqual(status, 303, body)
+        self.assertEqual(headers.get("Location"), "/login?e=bad_credentials")
+
+        status, _, page = self.get("/login?e=bad_credentials")
+        self.assertEqual(status, 200)
+        self.assertIn(b"Check the password and try again", page)
+        # The form is still there, so the next attempt costs one keystroke, not a URL edit.
+        self.assertIn(b'action="/api/login"', page)
+        self.assertIn(b'name=password', page)
+
+    def test_14c_a_json_caller_still_gets_json(self):
+        self.sign_in()
+        self.jar.clear()
+        status, _, body = self.post_json(
+            "/api/login", {"username": "operator", "password": "not-the-password"}
+        )
+        self.assertEqual(status, 401)
+        self.assertEqual(self.body_json(body)["error"], "bad_credentials")
+
+    def test_14d_an_invented_notice_code_puts_nothing_on_the_page(self):
+        self.sign_in()
+        self.jar.clear()
+        status, _, page = self.get("/login?e=%3Cb%3Eboom%3C/b%3E")
+        self.assertEqual(status, 200)
+        self.assertNotIn(b"boom", page)
+        self.assertNotIn(b'class="banner', page)
+
+    def test_14e_the_correct_password_works_after_a_failure(self):
+        self.sign_in()
+        self.jar.clear()
+        self.post_form("/api/login", {"username": "operator", "password": "not-the-password"})
+        status, headers, _ = self.post_form(
+            "/api/login", {"username": "operator", "password": PASSWORD}
+        )
+        self.assertEqual(status, 303)
+        self.assertEqual(headers.get("Location"), "/")
+        self.assertIn("tvd_session=", headers.get("Set-Cookie", ""))
 
     def test_15_logout_revokes_the_session(self):
         csrf = self.sign_in()
@@ -392,6 +455,58 @@ class WithDevice(_Base):
             status, _, body = self.post_json("/api/launch", {"package": bad}, csrf=csrf)
             self.assertEqual(status, 400, bad)
             self.assertEqual(self.body_json(body)["error"], "bad_package")
+
+    def test_95b_quick_launch_takes_an_alias_and_never_a_package(self):
+        csrf = self.sign_in()
+        status, _, body = self.post_json("/api/quick_launch", {"platform": "netflix"}, csrf=csrf)
+        self.assertEqual(status, 200, body)
+        payload = self.body_json(body)
+        self.assertEqual(payload["platform"], "netflix")
+        # The answer names the platform, not what was actually run on the device.
+        self.assertNotIn("package", payload)
+
+    def test_95c_an_unknown_platform_is_refused_before_any_device_lookup(self):
+        csrf = self.sign_in()
+        for bad in ("com.netflix.ninja", "netflix; reboot", "../etc", ""):
+            status, _, body = self.post_json("/api/quick_launch", {"platform": bad}, csrf=csrf)
+            self.assertEqual(status, 400, bad)
+            self.assertEqual(self.body_json(body)["error"], "bad_platform", bad)
+
+    def test_95d_the_dashboard_shows_the_chosen_tiles_and_nothing_else(self):
+        csrf = self.sign_in()
+        status, _, page = self.get("/")
+        self.assertEqual(status, 200)
+        for label in (b"Netflix", b"Disney+", b"Prime Video", b"YouTube", b"HBO Max"):
+            self.assertIn(label, page)
+        self.assertNotIn(b"Crunchyroll", page)
+        self.assertNotIn(b"com.netflix", page)
+
+        status, _, body = self.post_json(
+            "/api/prefs/quick_launch", {"alias": "netflix", "on": "0"}, csrf=csrf
+        )
+        self.assertEqual(status, 200, body)
+        self.assertNotIn("netflix", self.body_json(body)["quick_launch"])
+
+        _, _, page = self.get("/")
+        self.assertNotIn(b"Netflix", page)
+        # And it is still offered in Settings, or it could never be switched back on.
+        _, _, settings = self.get("/settings")
+        self.assertIn(b'data-alias="netflix"', settings)
+
+        status, _, body = self.post_json(
+            "/api/prefs/quick_launch", {"alias": "netflix", "on": "1"}, csrf=csrf
+        )
+        self.assertEqual(status, 200, body)
+        _, _, page = self.get("/")
+        self.assertIn(b"Netflix", page)
+
+    def test_95e_an_unknown_alias_cannot_be_switched_on(self):
+        csrf = self.sign_in()
+        status, _, body = self.post_json(
+            "/api/prefs/quick_launch", {"alias": "com.evil.app", "on": "1"}, csrf=csrf
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(self.body_json(body)["error"], "bad_platform")
 
     def test_96_a_device_can_be_forgotten_by_id(self):
         csrf = self.sign_in()

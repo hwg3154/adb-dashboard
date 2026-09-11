@@ -1,11 +1,12 @@
 <section class="panel narrow">
 <h2>Android TV Dashboard</h2>
+$error
 <p class="muted">$hint</p>
 <form id="login-form" class="stack" method="post" action="/api/login">
 <label for=username>User name</label>
 <input id=username name=username type=text value="operator" autocomplete="username" maxlength=32 spellcheck="false">
 <label for=password>Password</label>
-<input id=password name=password type=password autocomplete="current-password" maxlength=128>
+<input id=password name=password type=password autocomplete="current-password" maxlength=128 autofocus>
 <button type=submit>Sign in</button>
 </form>
 <p class="muted">The wizard is the only way to create the first account. There is no password reset.</p>

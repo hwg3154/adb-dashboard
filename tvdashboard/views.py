@@ -54,12 +54,59 @@ _APP_ACTIONS = (
 
 #: What each page fragment may contain. A template cannot ask for more than this.
 _FRAGMENT_FIELDS = {
-    "index": frozenset({"notice", "tiles", "text_field", "screenshot", "device"}),
+    "index": frozenset({"notice", "keys", "quick", "text_field", "screenshot", "device"}),
     "apps": frozenset({"notice", "app_rows"}),
-    "settings": frozenset({"notice", "device_rows", "password_form"}),
-    "login": frozenset({"notice", "hint"}),
+    "settings": frozenset({"notice", "device_rows", "password_form", "quick_launch"}),
+    "login": frozenset({"notice", "hint", "error"}),
     "setup": frozenset({"notice", "candidate_rows"}),
 }
+
+#: The pad, drawn as it sits under a thumb: arrows around OK, and the four keys a remote puts
+#: in the corners. "" would be a hole in the grid; there are none left.
+_PAD_LAYOUT: tuple[tuple[str, ...], ...] = (
+    ("back", "dpad_up", "home"),
+    ("dpad_left", "dpad_center", "dpad_right"),
+    ("menu", "dpad_down", "play_pause"),
+)
+
+#: Which of those are the pad proper. The rest are corners and are drawn quieter.
+_PAD_CORE = frozenset({"dpad_up", "dpad_down", "dpad_left", "dpad_right", "dpad_center"})
+
+#: The row under the pad. Everything else is one tap away in a group.
+_ESSENTIAL_KEYS: tuple[str, ...] = (
+    "volume_down",
+    "volume_up",
+    "volume_mute",
+    "search",
+)
+
+#: Section titles for the keys that are not on the pad or in the essential row, in the order
+#: the sections are drawn. A key whose group is missing here lands in "More".
+_GROUP_TITLES: tuple[tuple[str, str], ...] = (
+    ("media", "Media"),
+    ("volume", "Volume"),
+    ("tv", "TV"),
+    ("nav", "Navigation"),
+    ("system", "Power"),
+)
+
+#: What `/login?e=<code>` may say, and how loudly. The browser names the code; the sentence is
+#: chosen here, so a crafted link cannot put words on the sign-in page. `api._LOGIN_NOTICE_CODES`
+#: is the other half of this contract.
+LOGIN_NOTICES: dict[str, tuple[str, str]] = {
+    "bad_credentials": ("error", "That sign-in did not work. Check the password and try again."),
+    "locked": ("error", "Too many attempts. Wait a moment, then try again."),
+    "weak_password": ("error", "That password is too short - use at least 10 characters."),
+    "bad_request": ("error", "That sign-in could not be read. Try again."),
+    "not_initialized": ("error", "There is no account yet. Create the password below."),
+    "signed_out": ("info", "Signed out."),
+}
+
+
+def login_notice(code: object) -> str:
+    """Validate a `?e=` code against the notice table. Anything unknown becomes ''."""
+    candidate = code.strip().lower() if isinstance(code, str) else ""
+    return candidate if candidate in LOGIN_NOTICES else ""
 
 #: Which nav entry is lit. Keyed by the page title, which we choose, not the browser.
 _CURRENT = {
@@ -105,10 +152,20 @@ class View:
     def __init__(self, config: Config) -> None:
         self.config = config
 
-    def index(self, reg: registry.Registry, csrf: str) -> tuple[int, str]:
-        """The remote: a focusable panel of key tiles, a text field, one screenshot."""
+    def index(
+        self,
+        reg: registry.Registry,
+        csrf: str,
+        tiles: list[dict[str, object]] | None = None,
+    ) -> tuple[int, str]:
+        """The remote: quick launch, a d-pad, the essential keys, then everything else.
+
+        The order is the order a thumb needs it in, and the same markup serves a phone and a
+        desktop - the layout is CSS, so there is one page to keep correct, not two.
+        """
         return self._page("Dashboard", "index", {
-            "tiles": self._tiles(csrf),
+            "quick": self._quick_launch(tiles, csrf),
+            "keys": self._keys(csrf),
             "text_field": self._text_field(csrf),
             "screenshot": self._screenshot(),
             "device": self._devices(reg, csrf),
@@ -123,19 +180,35 @@ class View:
         })
         return 200, self._wrap("Apps", body, csrf)
 
-    def settings(self, reg: registry.Registry, csrf: str) -> tuple[int, str]:
-        """Settings: the device list and the password. Nothing else."""
+    def settings(
+        self,
+        reg: registry.Registry,
+        csrf: str,
+        catalog: list[dict[str, object]] | None = None,
+        installed: object = None,
+    ) -> tuple[int, str]:
+        """Settings: the device list, the quick-launch checkboxes, and the password."""
         rows = [self._device_row(device, csrf) for device in reg.list_public()[:MAX_ROWS]]
         body = self._fill("settings", {
             "device_rows": "\n".join(item for item in rows if item)
             or '<p class=muted>No device is paired yet. Use <a href="/setup">Set up TV</a>.</p>',
+            "quick_launch": self._quick_launch_choices(catalog, csrf, installed),
             "password_form": self._password_form(csrf),
-        })
+        }, csrf)
         return 200, self._wrap("Settings", body, csrf)
 
-    def login(self, csrf: str = "", *, first_run: bool = False) -> tuple[int, str]:
-        """Sign in, or the first-run password form. One page, one different hint."""
-        body = self._fill("login", {"hint": _login_hint(first_run)}, csrf)
+    def login(
+        self, csrf: str = "", *, first_run: bool = False, notice: str = ""
+    ) -> tuple[int, str]:
+        """Sign in, or the first-run password form.
+
+        A failed attempt comes back here with a code, so a wrong password ends on a form that
+        is ready for the next try rather than on a page of JSON.
+        """
+        body = self._fill("login", {
+            "hint": _login_hint(first_run),
+            "error": _login_banner(notice),
+        }, csrf)
         return 200, self._wrap("Sign in", body, csrf)
 
     def setup(self, candidates: list[dict[str, object]], csrf: str) -> tuple[int, str]:
@@ -149,25 +222,158 @@ class View:
 
     # --------------------------------------------------------------------------- components
 
-    def _tiles(self, csrf: str = "") -> str:
-        """A grid of key buttons. The alias is the only thing the browser ever names."""
+    def _keys(self, csrf: str = "") -> str:
+        """The whole remote, in three tiers: the pad, the essentials, then the rest.
+
+        Every button is the same thing it always was - a submit that names one alias - so the
+        page still works with the script blocked, and the server still decides what an alias
+        means. Only the arrangement is new.
+        """
         from .keys import KEY_ALIASES
 
-        out: list[str] = []
-        for spec in tuple(KEY_ALIASES.values())[:MAX_TILES]:
+        specs = tuple(KEY_ALIASES.values())[:MAX_TILES]
+        by_alias: dict[str, object] = {}
+        for spec in specs:
             alias = getattr(spec, "alias", "")
-            label = getattr(spec, "label", "")
+            if isinstance(alias, str) and _ALIAS_RE.match(alias):
+                by_alias[alias] = spec
+        placed: set[str] = set()
+
+        parts = [
+            _csrf_input(csrf),
+            self._pad(by_alias, placed),
+            self._essentials(by_alias, placed),
+            self._key_groups(by_alias, placed),
+        ]
+        return "".join(part for part in parts if part)
+
+    def _pad(self, by_alias: dict[str, object], placed: set[str]) -> str:
+        """The pad: four arrows around OK, with Back, Home, Menu and Play in the corners.
+
+        Nine keys in one thumb-sized block is the whole remote most of the time, which is why
+        it is the first thing on the page and the only thing that never collapses.
+        """
+        cells: list[str] = []
+        for row in _PAD_LAYOUT:
+            for alias in row:
+                spec = by_alias.get(alias)
+                if alias and spec is not None:
+                    placed.add(alias)
+                    cells.append(
+                        _key_button(spec, extra="pad-key" if alias in _PAD_CORE else "pad-corner")
+                    )
+                else:
+                    cells.append('<span class="pad-gap" aria-hidden="true"></span>')
+        return '<div class="pad" role="group" aria-label="Direction pad">' + "".join(cells) + "</div>"
+
+    def _essentials(self, by_alias: dict[str, object], placed: set[str]) -> str:
+        """Back, Home and the handful of keys nobody wants to go looking for."""
+        out: list[str] = []
+        for alias in _ESSENTIAL_KEYS:
+            spec = by_alias.get(alias)
+            if spec is None:
+                continue
+            placed.add(alias)
+            out.append(_key_button(spec, extra="essential-key"))
+        if not out:
+            return ""
+        return '<div class="essentials" role="group" aria-label="Essential keys">' + "".join(out) + "</div>"
+
+    def _key_groups(self, by_alias: dict[str, object], placed: set[str]) -> str:
+        """Everything the pad and the essential row did not take, grouped and collapsed."""
+        buckets: dict[str, list[str]] = {}
+        for alias, spec in by_alias.items():
+            if alias in placed:
+                continue
+            group = getattr(spec, "group", "") or "other"
+            buckets.setdefault(group if isinstance(group, str) else "other", []).append(
+                _key_button(spec)
+            )
+
+        titles = list(_GROUP_TITLES) + [
+            (group, "More") for group in buckets if group not in dict(_GROUP_TITLES)
+        ]
+        sections: list[str] = []
+        for group, title in titles:
+            tiles = buckets.pop(group, [])
+            if not tiles:
+                continue
+            sections.append(
+                '<details class="key-group" open><summary>'
+                + render_text(title)
+                + '</summary><div class="keys">'
+                + "".join(tiles)
+                + "</div></details>"
+            )
+        return "".join(sections)
+
+    def _quick_launch(self, tiles: list[dict[str, object]] | None, csrf: str = "") -> str:
+        """Quick-launch tiles. The browser names a platform alias, never a package."""
+        rows: list[str] = []
+        for tile in (tiles or [])[:MAX_TILES]:
+            alias = tile.get("alias", "") if isinstance(tile, dict) else ""
+            label = tile.get("label", "") if isinstance(tile, dict) else ""
             if not isinstance(alias, str) or not _ALIAS_RE.match(alias):
                 continue
-            confirm = getattr(spec, "confirm", "")
-            out.append(
-                '<button class="tile ' + render_attr(getattr(spec, "group", "")) + '"'
-                ' type=submit form=key-form name="key"'
-                ' value="' + render_attr(alias) + '"'
-                + (' data-confirm="' + render_attr(confirm) + '"' if confirm else "")
-                + ">" + render_text(label) + "</button>"
+            rows.append(
+                '<button class="tile app" type=submit form=quick-form name="platform"'
+                ' value="' + render_attr(alias) + '">'
+                + render_text(label)
+                + "</button>"
             )
-        return '<div class=keys>' + "".join(out) + "</div>" + _csrf_input(csrf)
+        if not rows:
+            return (
+                '<p class=muted>No quick-launch app is switched on. '
+                'Pick some in <a href="/settings">Settings</a>.</p>'
+            )
+        return (
+            '<form id="quick-form" method=post action="/api/quick_launch">'
+            + _csrf_input(csrf)
+            + '<div class="keys apps-grid">'
+            + "".join(rows)
+            + "</div></form>"
+        )
+
+    def _quick_launch_choices(
+        self, catalog: list[dict[str, object]] | None, csrf: str, installed: object = None
+    ) -> str:
+        """One checkbox per catalogued app: on shows a tile, off hides it.
+
+        Each row is its own tiny form, so the page works without the script and so one POST
+        carries one decision - there is no list of names to parse on the way in.
+        """
+        seen = installed if isinstance(installed, (set, frozenset)) else frozenset()
+        rows: list[str] = []
+        for item in (catalog or [])[:MAX_TILES]:
+            if not isinstance(item, dict):
+                continue
+            alias = item.get("alias", "")
+            label = item.get("label", "")
+            package = item.get("package", "")
+            if not isinstance(alias, str) or not _ALIAS_RE.match(alias):
+                continue
+            on = bool(item.get("on"))
+            detected = isinstance(package, str) and package in seen
+            rows.append(
+                '<form method=post action="/api/prefs/quick_launch" class="choice'
+                + (" on" if on else "")
+                + '" data-alias="' + render_attr(alias) + '">'
+                + '<input type=hidden name=alias value="' + render_attr(alias) + '">'
+                + '<input type=hidden name=on value="' + ("0" if on else "1") + '">'
+                + _csrf_input(csrf)
+                + '<button type=submit class="check" role="switch" aria-checked="'
+                + ("true" if on else "false")
+                + '"><span class="box" aria-hidden="true">'
+                + ("&#10003;" if on else "")
+                + "</span><span class=name>"
+                + render_text(label)
+                + "</span>"
+                + ('<span class="pill">on this TV</span>' if detected else "")
+                + "</button></form>"
+            )
+        if not rows:
+            return "<p class=muted>The quick-launch catalogue is empty.</p>"
+        return '<div class="choices">' + "".join(rows) + "</div>"
 
     def _text_field(self, csrf: str = "") -> str:
         limit = min(self.config.max_text_chars, MAX_INPUT_CHARS)
@@ -340,13 +546,51 @@ def _nav() -> str:
 def _notice(config: Config) -> str:
     if config.allow_insecure_http:
         return ""
-    return "Plain HTTP on a trusted LAN. No TLS, no cloud, no telemetry."
+    return '<p class="banner warn">Plain HTTP on a trusted LAN. No TLS, no cloud, no telemetry.</p>'
 
 
 def _login_hint(first_run: bool) -> str:
     if first_run:
         return "Create the dashboard password. The TV does not ask for one."
     return "Sign in with the dashboard password, not the TV password."
+
+
+def _login_banner(code: object) -> str:
+    """Render one notice on the sign-in page, from the table and never from the browser."""
+    notice = login_notice(code)
+    if not notice:
+        return ""
+    tone, message = LOGIN_NOTICES[notice]
+    return (
+        '<p class="banner '
+        + render_attr(tone)
+        + '" role="status">'
+        + render_text(message)
+        + "</p>"
+    )
+
+
+def _key_button(spec: object, extra: str = "") -> str:
+    """One key tile. The alias is the only thing that travels; the keycode stays here."""
+    alias = getattr(spec, "alias", "")
+    if not isinstance(alias, str) or not _ALIAS_RE.match(alias):
+        return ""
+    # The group is prefixed because a bare group name ("nav", "media", "system") is exactly the
+    # sort of word a page-level class already uses, and a key tile must not inherit page layout.
+    group = getattr(spec, "group", "")
+    classes = "tile" + (" g-" + render_attr(group) if isinstance(group, str) and group else "")
+    if extra:
+        classes += " " + render_attr(extra)
+    confirm = getattr(spec, "confirm", "")
+    return (
+        '<button class="' + classes + '"'
+        ' type=submit form=key-form name="key"'
+        ' value="' + render_attr(alias) + '"'
+        + (' data-confirm="' + render_attr(confirm) + '"' if confirm else "")
+        + ">"
+        + render_text(getattr(spec, "label", ""))
+        + "</button>"
+    )
 
 
 def _action_form(action: str, package: str, label: str, csrf: str, confirm: str = "") -> str:

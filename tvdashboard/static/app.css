@@ -1,32 +1,340 @@
-:root { --fg:#17202a; --muted:#6b7280; --line:#d6dbe1; --bg:#f7f8fa; --accent:#0b6bcb; --danger:#b3261e; }
+/* Android TV Dashboard - one stylesheet, no build step, no CDN.
+ *
+ * Mobile first: the phone layout is the plain one and the desktop layout is the media query,
+ * because the phone is the remote you actually pick up. Touch targets are 44px or larger,
+ * the d-pad is a real pad rather than six buttons in a row, and nothing that matters is
+ * behind a hover.
+ */
+
+:root {
+  --fg: #17202a;
+  --muted: #5b6472;
+  --line: #d6dbe1;
+  --bg: #f7f8fa;
+  --card: #ffffff;
+  --tile: #f0f3f7;
+  --tile-hover: #e3e9f1;
+  --accent: #0b6bcb;
+  --accent-fg: #ffffff;
+  --danger: #b3261e;
+  --ok: #1c7a4a;
+  --radius: 10px;
+  --tap: 46px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fg: #e8ecf1;
+    --muted: #9aa4b2;
+    --line: #2b323c;
+    --bg: #12161c;
+    --card: #1a1f27;
+    --tile: #232a34;
+    --tile-hover: #2d3540;
+    --accent: #59a6ff;
+    --accent-fg: #0b1622;
+    --danger: #ff8a80;
+    --ok: #6ddba0;
+  }
+}
+
 * { box-sizing: border-box; }
-body { margin:0; color:var(--fg); background:var(--bg); font:15px/1.5 system-ui,-apple-system,'Segoe UI',sans-serif; }
-.bar { display:flex; align-items:center; gap:16px; padding:12px 16px; background:#fff; border-bottom:1px solid var(--line); }
-.brand { font-weight:600; text-decoration:none; color:var(--fg); }
-.nav { display:flex; gap:12px; flex:1; }
-.nav a { color:var(--accent); text-decoration:none; }
-.nav-on { font-weight:600; }
-.state { color:var(--muted); font-variant-numeric:tabular-nums; }
-.state.on { color:var(--accent); font-weight:600; }
-.page { max-width:900px; margin:0 auto; padding:16px; }
-.panel { background:#fff; border:1px solid var(--line); border-radius:8px; padding:16px; margin-bottom:16px; }
-.narrow { max-width:420px; margin-inline:auto; }
-.muted { color:var(--muted); }
-.error { color:var(--danger); }
-.stack { display:grid; gap:8px; }
-.stack label { font-size:13px; color:var(--muted); }
-input[type=text], input[type=password] { padding:9px 10px; border:1px solid var(--line); border-radius:6px; font:inherit; }
-button { padding:9px 14px; border:1px solid var(--line); border-radius:6px; background:#f0f3f7; color:var(--fg); font:inherit; cursor:pointer; }
-button:hover { background:#e6ebf2; }
-button:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
-.danger { color:var(--danger); }
-.remote:focus { outline:2px solid var(--accent); }
-.keys { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; }
-@media (min-width:720px) { .keys { grid-template-columns:repeat(6,minmax(0,1fr)); } }
-ul { list-style:none; padding:0; margin:0; }
-.row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; padding:10px 0; border-bottom:1px solid var(--line); }
-.pkg, .label, .model { font-family:ui-monospace,SFMono-Regular,monospace; font-size:13px; }
-.host, .score { color:var(--muted); font-size:13px; }
-.actions { display:flex; gap:6px; margin-left:auto; }
-.inline { display:inline; }
-.screen { display:block; max-width:100%; height:auto; border:1px solid var(--line); border-radius:6px; }
+
+body {
+  margin: 0;
+  color: var(--fg);
+  background: var(--bg);
+  font: 15px/1.5 system-ui, -apple-system, 'Segoe UI', sans-serif;
+  -webkit-text-size-adjust: 100%;
+}
+
+/* ------------------------------------------------------------------------------ chrome */
+
+.bar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  padding: 10px 16px;
+  padding-top: max(10px, env(safe-area-inset-top));
+  background: var(--card);
+  border-bottom: 1px solid var(--line);
+}
+
+.brand { font-weight: 600; text-decoration: none; color: var(--fg); flex: none; }
+/* Scoped to the bar: "nav" is a common word, and a key tile must never pick up page layout. */
+.bar .nav { display: flex; gap: 14px; flex-wrap: wrap; }
+.bar .nav a { color: var(--accent); text-decoration: none; padding: 4px 0; }
+.nav-on { font-weight: 600; }
+
+.state {
+  color: var(--muted);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  margin-left: auto;
+  flex: none;
+}
+
+.state.on { color: var(--ok); font-weight: 600; }
+.state.error { color: var(--danger); font-weight: 600; }
+
+/* On a phone the bar is two rows - name and status, then the links - rather than three
+   wrapped fragments of one row. */
+@media (max-width: 519px) {
+  .bar { gap: 4px 10px; padding: 8px 12px; }
+  .bar .nav { order: 3; flex-basis: 100%; gap: 16px; font-size: 14px; }
+  .state { order: 2; }
+}
+
+.page {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 16px;
+  padding-bottom: max(16px, env(safe-area-inset-bottom));
+}
+
+.panel {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 14px;
+}
+.panel > h2, .panel-head h2 { font-size: 16px; margin: 0 0 10px; }
+.panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.panel-head h2 { margin-bottom: 10px; }
+.narrow { max-width: 420px; margin-inline: auto; }
+.muted { color: var(--muted); }
+.hint { font-size: 13px; margin-top: 0; }
+.small { font-size: 13px; color: var(--accent); text-decoration: none; }
+.error { color: var(--danger); }
+
+.banner {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  font-size: 14px;
+}
+.banner.error { background: color-mix(in srgb, var(--danger) 12%, transparent); border-color: var(--danger); color: var(--fg); }
+.banner.info { background: color-mix(in srgb, var(--accent) 12%, transparent); border-color: var(--accent); }
+.banner.warn { background: color-mix(in srgb, var(--muted) 12%, transparent); color: var(--muted); }
+
+kbd {
+  font: 12px/1 ui-monospace, SFMono-Regular, monospace;
+  padding: 3px 5px;
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  background: var(--tile);
+}
+
+/* ------------------------------------------------------------------------------- forms */
+
+.stack { display: grid; gap: 8px; }
+.stack label { font-size: 13px; color: var(--muted); }
+
+input[type=text], input[type=password] {
+  padding: 11px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--card);
+  color: var(--fg);
+  font: inherit;
+  min-height: var(--tap);
+  width: 100%;
+}
+
+button {
+  min-height: var(--tap);
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--tile);
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+button:hover { background: var(--tile-hover); }
+button:active { transform: translateY(1px); }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button[disabled] { opacity: .55; cursor: default; }
+.ghost { background: transparent; min-height: 36px; padding: 6px 10px; font-size: 13px; }
+.danger { color: var(--danger); }
+.signout { margin-top: 14px; }
+.signout button { max-width: 200px; }
+
+/* ------------------------------------------------------------------------------ remote */
+
+.remote { scroll-margin-top: 60px; }
+.remote:focus { outline: 2px solid var(--accent); outline-offset: 2px; }
+.remote:focus-visible { outline: 2px solid var(--accent); }
+
+#key-form { display: grid; gap: 12px; }
+
+/* The pad: arrows around OK, sized for a thumb and centred on a phone. */
+.pad {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  width: 100%;
+  max-width: 276px;
+  margin: 0 auto;
+}
+.pad-gap { display: block; }
+.pad .tile {
+  display: grid;
+  place-items: center;
+  aspect-ratio: 1 / 1;
+  min-height: 56px;
+  padding: 4px;
+  font-size: 14px;
+  line-height: 1.2;
+}
+.pad .pad-corner { font-size: 13px; color: var(--muted); }
+.pad .pad-corner.g-system { color: var(--danger); }
+.pad .tile[value="dpad_center"] {
+  border-radius: 50%;
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-fg);
+  font-weight: 600;
+}
+.pad .tile[value="dpad_center"]:hover { filter: brightness(1.08); }
+
+/* auto-fill, not auto-fit: an empty column stays empty instead of stretching one lonely
+   button across the panel. */
+.essentials {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+  gap: 8px;
+  align-content: start;
+}
+.essentials .tile { white-space: nowrap; font-size: 14px; padding-inline: 8px; }
+
+.keys {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+  gap: 8px;
+}
+.apps-grid { grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); }
+
+.tile { text-align: center; overflow-wrap: anywhere; }
+.tile.g-system { color: var(--danger); }
+.tile.app { font-weight: 600; }
+
+.key-group { border-top: 1px solid var(--line); padding-top: 10px; }
+.key-group > summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--muted);
+  padding: 6px 0;
+  list-style-position: inside;
+}
+.key-group > summary::marker { color: var(--line); }
+.key-group[open] > summary { margin-bottom: 8px; }
+
+.send { margin-top: 4px; }
+.send button { justify-self: start; }
+
+/* ---------------------------------------------------------------------- quick launch */
+
+.quick-panel { border-color: color-mix(in srgb, var(--accent) 35%, var(--line)); }
+
+.choices { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; }
+.choice { margin: 0; }
+.choice .check {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+}
+.choice .box {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  font-size: 14px;
+  line-height: 1;
+  background: var(--card);
+}
+.choice.on .check { background: var(--tile); border-color: var(--accent); }
+.choice.on .box { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+.choice .name { flex: 1; }
+.choice .pill {
+  font-size: 11px;
+  color: var(--ok);
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  padding: 1px 7px;
+  white-space: nowrap;
+}
+
+/* --------------------------------------------------------------------------- listings */
+
+ul { list-style: none; padding: 0; margin: 0; }
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+.row:last-child { border-bottom: 0; }
+.pkg, .label, .model { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 13px; }
+.host, .score, .kind { color: var(--muted); font-size: 13px; }
+.actions { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; }
+.actions button { min-height: 40px; padding: 8px 12px; font-size: 13px; }
+.inline { display: flex; gap: 6px; margin: 0; }
+.inline input[type=text] { width: auto; min-width: 0; flex: 1; min-height: 40px; padding: 6px 10px; }
+
+@media (max-width: 519px) {
+  .actions { margin-left: 0; width: 100%; }
+  .row .inline { flex: 1 1 auto; }
+}
+
+.screen {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  margin-top: 10px;
+}
+.shot { margin-bottom: 4px; }
+
+details.panel > summary { cursor: pointer; list-style-position: inside; min-height: 24px; }
+details.panel > summary h2 { display: inline; font-size: 16px; }
+details.panel[open] > summary { margin-bottom: 8px; }
+
+/* ------------------------------------------------------------------------- wide screens */
+
+@media (min-width: 720px) {
+  #key-form { grid-template-columns: minmax(0, 276px) minmax(0, 1fr); align-items: start; }
+  .pad { grid-column: 1; margin: 0; }
+  .essentials { grid-column: 2; grid-template-columns: repeat(auto-fit, minmax(104px, 1fr)); }
+  .key-group { grid-column: 1 / -1; }
+  .send { grid-template-columns: auto 1fr auto; align-items: center; }
+}
+
+/* A phone in landscape has almost no height: keep the pad reachable, shrink the rest. */
+@media (max-height: 460px) and (orientation: landscape) {
+  .pad { max-width: 240px; }
+  .pad .tile { min-height: 48px; }
+  .panel { padding: 12px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  button:active { transform: none; }
+}

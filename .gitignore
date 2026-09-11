@@ -6,6 +6,7 @@
 accounts.json
 sessions.json
 devices.json
+prefs.json
 
 # --- Secrets ----------------------------------------------------------------
 .env
