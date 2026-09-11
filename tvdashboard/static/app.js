@@ -35,12 +35,7 @@
     Backspace: "back",
     Home: "home",
     ContextMenu: "menu",
-    PageUp: "channel_up",
-    PageDown: "channel_down",
     MediaPlayPause: "play_pause",
-    MediaTrackNext: "media_next",
-    MediaTrackPrevious: "media_previous",
-    MediaStop: "media_stop",
     AudioVolumeUp: "volume_up",
     AudioVolumeDown: "volume_down",
     AudioVolumeMute: "volume_mute"

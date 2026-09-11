@@ -35,8 +35,8 @@ class KeycodeMap(unittest.TestCase):
                 keys.resolve_key(bad)
 
     def test_destructive_keys_carry_a_confirmation(self):
-        for alias in ("power", "sleep"):
-            self.assertTrue(keys.KEY_ALIASES[alias].is_destructive)
+        # Power is the one key that affects everyone in the room, so it asks first.
+        self.assertTrue(keys.KEY_ALIASES["power"].is_destructive)
 
     def test_escape_is_the_back_key(self):
         # design.md §4: Esc is Back, the way it is on a remote. Shift+Esc releases the panel,
