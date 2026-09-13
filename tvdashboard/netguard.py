@@ -173,3 +173,31 @@ def _in_allowed_nets(address: ipaddress.IPv4Address, allowed_cidrs: tuple[str, .
         if net.version == 4 and address in net:
             return True
     return False
+
+
+_MAC_SEPARATED_RE = re.compile(r"^[0-9a-f]{1,2}([:-])(?:[0-9a-f]{1,2}\1){4}[0-9a-f]{1,2}$")
+_MAC_BARE_RE = re.compile(r"^[0-9a-f]{12}$")
+
+
+def normalize_mac(value: object) -> str:
+    """Canonicalize a MAC address to `aa:bb:cc:dd:ee:ff`, or return '' when it is not one.
+
+    Accepts the forms tools actually print: colon or dash separated, bare hex, and the
+    zero-dropping `d0:65:b3:27:38:b` that macOS `arp` shows. Refuses what a magic packet must
+    never be built from: all-zero (an unresolved ARP entry), broadcast, and group addresses.
+    """
+    if not isinstance(value, str):
+        return ""
+    raw = value.strip().lower()
+    if not raw or len(raw) > 17:
+        return ""
+    if _MAC_BARE_RE.match(raw):
+        octets = [raw[i : i + 2] for i in range(0, 12, 2)]
+    elif _MAC_SEPARATED_RE.match(raw):
+        octets = [part.zfill(2) for part in re.split(r"[:-]", raw)]
+    else:
+        return ""
+    packed = bytes(int(octet, 16) for octet in octets)
+    if packed in (b"\x00" * 6, b"\xff" * 6) or packed[0] & 0x01:
+        return ""
+    return ":".join(octets)

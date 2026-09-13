@@ -336,6 +336,10 @@ class View:
         ordered: list[str] = []
         for group, _title in _GROUP_TITLES:
             ordered.extend(buckets.pop(group, []))
+            # Wake goes beside Sleep: the other half of the pair, even though it is a network
+            # packet rather than a key.
+            if group == "system":
+                ordered.append(_wake_button())
         for remaining in buckets.values():
             ordered.extend(remaining)
         if not ordered:
@@ -698,6 +702,15 @@ def _logo_thumb(item: object) -> str:
     return (
         '<img class="thumb" src="' + render_attr(logo) + '" alt="" aria-hidden="true"'
         ' loading="lazy" decoding="async">'
+    )
+
+
+def _wake_button() -> str:
+    """Wake is not a key - a sleeping TV has no adb to receive one. It posts the remote's own
+    form (and so its CSRF token) to `/api/wake`, which sends Wake-on-LAN to the last TV used."""
+    return (
+        '<button class="tile wake" type=submit form=key-form formaction="/api/wake">'
+        "Wake</button>"
     )
 
 

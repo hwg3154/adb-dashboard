@@ -17,7 +17,7 @@ from pathlib import Path
 
 from . import storage
 from .config import Config
-from .netguard import normalize_target
+from .netguard import normalize_mac, normalize_target
 
 REGISTRY_FILE = "devices.json"
 DOC_VERSION = 1
@@ -46,6 +46,9 @@ class Device:
     model: str
     added_at: int
     last_used: int
+    #: Learned while the TV is awake and needed only once it is asleep, for Wake-on-LAN.
+    #: Server-side only: it is never sent to the browser and never taken from it.
+    mac: str = ""
 
     @property
     def label(self) -> str:
@@ -72,6 +75,7 @@ class Device:
             "model": self.model,
             "added_at": self.added_at,
             "last_used": self.last_used,
+            "mac": self.mac,
         }
 
 
@@ -157,12 +161,17 @@ class Registry:
         device = self.get(device_id)
         return device.target if device is not None else ""
 
-    def active_target(self) -> str:
-        """The one device the remote controls. The first join wins until it is forgotten."""
+    def active_device(self) -> Device | None:
+        """The one device the remote controls: the most recently used, then the newest."""
         for device in sorted(self.list(), key=lambda item: (item.last_used, item.added_at), reverse=True):
             if device.target:
-                return device.target
-        return ""
+                return device
+        return None
+
+    def active_target(self) -> str:
+        """The one device the remote controls. The first join wins until it is forgotten."""
+        device = self.active_device()
+        return device.target if device is not None else ""
 
     def use(self, device_id: object) -> bool:
         """Mark a device as the active one. v1 drives exactly one TV."""
@@ -182,6 +191,17 @@ class Registry:
         cleaned = _clean_nickname(nickname)
         self._devices[device.id] = replace(device, nickname=cleaned)
         self._save()
+        return True
+
+    def set_mac(self, device_id: object, mac: object) -> bool:
+        """Remember a device's MAC so it can be woken once it is asleep. Invalid is refused."""
+        device = self.get(device_id)
+        canonical = normalize_mac(mac)
+        if device is None or not canonical:
+            return False
+        if device.mac != canonical:
+            self._devices[device.id] = replace(device, mac=canonical)
+            self._save()
         return True
 
     def remove(self, device_id: object) -> bool:
@@ -355,6 +375,8 @@ def _device_from_storage(device_id: object, record: object, config: Config) -> D
         model=_clean_text(record.get("model"), MAX_MODEL_CHARS),
         added_at=_to_int(record.get("added_at")),
         last_used=_to_int(record.get("last_used")),
+        # Absent in files written before Wake existed; that just means "not learned yet".
+        mac=normalize_mac(record.get("mac")),
     )
 
 

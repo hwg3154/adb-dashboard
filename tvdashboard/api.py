@@ -21,7 +21,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
-from . import discovery, keys, netguard, platforms, security, textentry
+from . import discovery, keys, netguard, platforms, security, textentry, wol
 from .adb import AdbError, AdbResult
 from .auth import AuthError
 from .registry import RegistryError
@@ -282,7 +282,40 @@ def _key(app: object, request: Request, token: str, ip: str) -> Result:
     target = _target(app)
     if not target:
         return fail("no_device", 409)
-    return _adb(lambda: app.adb.send_key(target, spec.alias), key=spec.alias)
+    result = _adb(lambda: app.adb.send_key(target, spec.alias), key=spec.alias)
+    if result.status == 200:
+        _learn_mac(app, target)
+    return result
+
+
+def _wake(app: object, request: Request, token: str, ip: str) -> Result:
+    """Wake the most recently used TV with a Wake-on-LAN packet.
+
+    adb cannot do this: a sleeping TV has no port open. The packet is aimed at the TV's network
+    card instead, which the TV keeps powered in networked standby. Nothing here comes from the
+    browser - the device, its address and its MAC are all the server's own.
+
+    UDP gives no reply, so this reports that the packet was sent, not that the TV woke.
+    """
+    if not _KEYS.allow(token):
+        return fail("rate_limited", 429, retry_after=int(KEY_WINDOW_SECONDS))
+    with app.lock:
+        device = app.registry.active_device()
+    if device is None:
+        return fail("no_device", 409)
+
+    host = device.target.rsplit(":", 1)[0]
+    # Not learned yet: a recently-used TV may still have a stale ARP entry worth trying.
+    mac = device.mac or _learn_mac(app, device.target, force=True)
+    if not mac:
+        return fail("no_mac", 409)
+    try:
+        sent = wol.send(mac, host)
+    except ValueError:
+        return fail("no_mac", 409)
+    if not sent:
+        return fail("wake_failed", 502)
+    return ok(action="wake_sent")
 
 
 def _text(app: object, request: Request, token: str, ip: str) -> Result:
@@ -375,7 +408,13 @@ def _quick_launch(app: object, request: Request, token: str, ip: str) -> Result:
     The browser sends `netflix`, never a package: `platforms` owns the mapping. A service can
     ship under more than one package name, so a candidate the device does not have is followed
     by the next one rather than reported as a failure.
+
+    A TV that is asleep is woken first (`_wake_if_asleep`), so one press lands in the app.
     """
+    # A press can now send a broadcast and hold a thread for a few seconds, so it shares the
+    # key budget.
+    if not _KEYS.allow(token):
+        return fail("rate_limited", 429, retry_after=int(KEY_WINDOW_SECONDS))
     # An alias we do not know is refused before any device lookup, the same way an unknown key
     # is: a typo in the browser is not a reason to go and ask the TV anything.
     try:
@@ -391,6 +430,9 @@ def _quick_launch(app: object, request: Request, token: str, ip: str) -> Result:
     if not target:
         return fail("no_device", 409)
 
+    # One press: wake the TV first if it is asleep, then launch exactly as before.
+    woke = _wake_if_asleep(app, target)
+
     attempt = fail("adb_failed", 502)
     for package in candidates:
         attempt = _adb(
@@ -400,11 +442,59 @@ def _quick_launch(app: object, request: Request, token: str, ip: str) -> Result:
         )
         if attempt.status == 200:
             _remember_installed(app, [package])
-            return attempt
+            _learn_mac(app, target)
+            break
         # adb itself being gone is not something the next package can fix.
         if attempt.payload.get("error") == "adb_missing":
-            return attempt
+            break
+    attempt.payload["woke"] = woke
     return attempt
+
+
+#: One quick-launch press should wake a sleeping TV and still land in the app. The pause is the
+#: operator's figure for how long the TV takes to come back. If it is still not answering by
+#: then, the launch keeps checking for a little longer rather than failing, and goes ahead the
+#: moment the TV answers.
+QUICK_LAUNCH_WAKE_PAUSE = 3.0
+QUICK_LAUNCH_WAKE_GRACE = 10.0
+_WAKE_POLL_SECONDS = 0.5
+_AWAKE_PROBE_SECONDS = 1.0
+#: Indirection so the tests can run the sequence without really waiting.
+_sleep = time.sleep
+
+
+def _wake_if_asleep(app: object, target: str) -> bool:
+    """Before a launch: if the TV is asleep, wake it. Returns True when a packet was sent.
+
+    The sequence: check whether the TV answers; if it does not, send Wake-on-LAN, pause, then
+    wait (bounded) for it to answer before the launch goes ahead.
+
+    Anything that stops the wake - no MAC learned yet, a send that fails - falls back to
+    launching exactly as before rather than refusing. The check could be wrong, and a launch
+    that fails reports itself.
+    """
+    host, _, port_text = target.rpartition(":")
+    try:
+        port = int(port_text)
+    except ValueError:
+        return False
+    if wol.is_awake(host, port, _AWAKE_PROBE_SECONDS):
+        return False
+
+    mac = _learn_mac(app, target, force=True)
+    if not mac:
+        return False
+    try:
+        if not wol.send(mac, host):
+            return False
+    except ValueError:
+        return False
+
+    _sleep(QUICK_LAUNCH_WAKE_PAUSE)
+    deadline = time.monotonic() + QUICK_LAUNCH_WAKE_GRACE
+    while not wol.is_awake(host, port, _AWAKE_PROBE_SECONDS) and time.monotonic() < deadline:
+        _sleep(_WAKE_POLL_SECONDS)
+    return True
 
 
 def _prefs_quick_launch(app: object, request: Request, token: str, ip: str) -> Result:
@@ -645,6 +735,39 @@ def _remember_installed(app: object, packages: object) -> None:
         note(packages)
 
 
+#: After a MAC lookup comes up empty, leave that device alone for this long, so a lookup that
+#: keeps failing does not run on every key press.
+_MAC_RETRY_SECONDS = 60.0
+_MAC_MISSES: dict[str, float] = {}
+
+
+def _learn_mac(app: object, target: str, *, force: bool = False) -> str:
+    """Remember the MAC of a device that just answered, and return it ('' when unknown).
+
+    The ARP table only holds a TV's MAC while the TV is awake, and the MAC is only needed once
+    it is asleep - so it is picked up after a successful command and kept in the registry.
+    Once a device has one, this is a dictionary lookup.
+    """
+    with app.lock:
+        device = app.registry.get_by_target(target)
+    if device is None:
+        return ""
+    if device.mac:
+        return device.mac
+    now = time.monotonic()
+    last_miss = _MAC_MISSES.get(target)
+    if not force and last_miss is not None and now - last_miss < _MAC_RETRY_SECONDS:
+        return ""
+    mac = wol.lookup_mac(target.rsplit(":", 1)[0])
+    if not mac:
+        _MAC_MISSES[target] = now
+        return ""
+    _MAC_MISSES.pop(target, None)
+    with app.lock:
+        app.registry.set_mac(device.id, mac)
+    return mac
+
+
 def _adb(call: Callable[[], AdbResult], **fields: object) -> Result:
     """Run one adb call and turn its outcome into a stable code.
 
@@ -675,6 +798,7 @@ _ROUTES: dict[str, Callable[[object, Request, str, str], Result]] = {
     "/api/logout": _logout,
     "/api/change_password": _change_password,
     "/api/key": _key,
+    "/api/wake": _wake,
     "/api/text": _text,
     "/api/screenshot": _screenshot,
     "/api/apps": _apps,

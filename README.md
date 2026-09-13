@@ -11,9 +11,14 @@ The product and security contract is [docs/design.md](docs/design.md). adb synta
 ## What it does
 
 - A remote: a d-pad with Back, Home, Menu and Play in the corners, then volume and search, then
-  media / TV / power tucked into groups. Keys are forwarded only while the remote panel has
-  focus; `Esc` sends **Back**, and `Shift`+`Esc` (or the Release button) hands the keyboard back
-  to the page.
+  one row with media, captions, **Sleep** and **Wake**. Keys are forwarded only while the remote
+  panel has focus; `Esc` sends **Back**, and `Shift`+`Esc` (or the Release button) hands the
+  keyboard back to the page.
+- Wake over the network: **Wake** sends Wake-on-LAN to the last TV you used, and a quick-launch
+  tile wakes a sleeping TV before launching, so one press gets you into the app. The TV needs
+  networked standby on (TCL: energy mode *Optimised – networked standby*), and the dashboard
+  must be on the TV's network - bridged, if it runs in a VM. It learns the TV's MAC by itself
+  the first time you use any button while the TV is on.
 - Quick launch: one tile per streaming service — Netflix, Disney+, Prime Video, YouTube and
   HBO Max are on by default, and Settings has a checkbox for every app in the catalogue so the
   ones you do not have never appear. A service with artwork shows its logo; the rest show their

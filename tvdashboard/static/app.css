@@ -350,6 +350,7 @@ select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 }
 /* Power, Sleep and Wake stay legible but read as the keys you do not press by accident. */
 .tile.g-system { color: var(--danger); }
+.tile.wake { color: var(--ok); }
 
 .send { width: 100%; max-width: 560px; margin-top: 4px; }
 

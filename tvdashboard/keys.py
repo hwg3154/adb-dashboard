@@ -55,7 +55,7 @@ KEY_ALIASES: dict[str, KeySpec] = {
         _spec("volume_up", "KEYCODE_VOLUME_UP", "Volume +", "volume"),
         _spec("volume_down", "KEYCODE_VOLUME_DOWN", "Volume -", "volume"),
         _spec("volume_mute", "KEYCODE_VOLUME_MUTE", "Mute", "volume"),
-        _spec("power", "KEYCODE_POWER", "Power", "system", confirm="Put the TV to sleep? Audio and video keep running for anyone else in the room."),
+        _spec("sleep", "KEYCODE_SLEEP", "Sleep", "system", confirm="Put the TV to sleep? Press Wake to turn it back on."),
     )
 }
 

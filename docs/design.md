@@ -15,8 +15,7 @@ are answered in the two docs above; this file does not duplicate them.
 v1 is deliberately small: a remote, not a device manager.
 
 In scope:
-- Keyboard-driven navigation: d-pad, Enter, Back, Home, Menu, Channel ±, Guide, Info, Captions,
-  Aspect-Ratio, Power/Sleep/Wake.
+- Keyboard-driven navigation: d-pad, Back, Home, Menu, Captions, Sleep, and Wake over the network.
 - Text entry into the focused field on the TV, with a "Send to TV" field and an explicit Enter key.
 - App launcher: list launchable apps, launch, force-stop, app info, clear data, uninstall.
 - Quick launch: one tile per streaming service from a fixed catalogue, each switched on or off
@@ -25,7 +24,7 @@ In scope:
 - First-run setup wizard with network discovery, and password auth for a single operator.
 - Device registry (nickname, model, `host:port`), manual "Forget device".
 - One layout that works on a phone and on a desktop: the pad, the essential keys and quick
-  launch first, everything else grouped behind a summary.
+  launch first, everything else in one flat grid.
 
 Out of scope for v1: logcat, file browser, live screen mirroring, multi-user accounts,
 per-app settings editor, "Drive TV" hard toggle, env-seeded admin, TLS termination.
@@ -57,7 +56,8 @@ tvdashboard.web        HTTP server (stdlib ThreadingHTTPServer), routing, JSON I
    ├── tvdashboard.registry device registry + TTL cache, atomic JSON state in /data
    ├── tvdashboard.auth     password hash, sessions, rate limit
    ├── tvdashboard.security origin/host checks, CSRF, cookie flags, SSRF guard
-   └── tvdashboard.discovery asyncio sweep + UDP broadcast
+   ├── tvdashboard.discovery asyncio sweep + UDP broadcast
+   └── tvdashboard.wol      Wake-on-LAN magic packet, ARP lookup, adb-port awake check
 ```
 
 `python -m tvdashboard` starts the server. No daemon, no background threads other than the
@@ -81,16 +81,18 @@ accept loop; state is read from disk on demand and cached with a TTL.
 |---|---|
 | ArrowUp / Down / Left / Right | `KEYCODE_DPAD_UP` / `_DOWN` / `_LEFT` / `_RIGHT` |
 | Esc | `KEYCODE_BACK` (`Shift`+`Esc` is not forwarded: it releases the panel) |
-| Enter (in text context) | `KEYCODE_ENTER` |
+| Enter | `KEYCODE_DPAD_CENTER` (OK) |
 | Back / Home / Menu | `KEYCODE_BACK` / `KEYCODE_HOME` / `KEYCODE_MENU` |
-| Channel up / down | `KEYCODE_CHANNEL_UP` / `KEYCODE_CHANNEL_DOWN` |
-| Guide / Info / Captions / Aspect | `KEYCODE_GUIDE` / `KEYCODE_INFO` / `KEYCODE_CAPTIONS` / `KEYCODE_TV_ZOOM_MODE` |
-| Power / Sleep / Wake | `KEYCODE_POWER` / `KEYCODE_SLEEP` / `KEYCODE_WAKEUP` |
-| Media play / pause / next / prev / seek | `KEYCODE_MEDIA_*` |
+| Captions | `KEYCODE_CAPTIONS` |
+| Sleep | `KEYCODE_SLEEP` |
+| Media play / pause / rewind / fast-forward | `KEYCODE_MEDIA_*` |
 | Volume up / down / mute | `KEYCODE_VOLUME_UP` / `KEYCODE_VOLUME_DOWN` / `KEYCODE_VOLUME_MUTE` |
-| Mic | `KEYCODE_VOICE_ASSIST` |
 
-`KEYCODE_POWER` is a confirm-gated action (it locks the screen for everybody in the room).
+`KEYCODE_SLEEP` is confirm-gated: it switches the TV off for everybody in the room.
+
+**Wake is not a key.** A sleeping TV has no adb to receive one, so Wake is a Wake-on-LAN magic
+packet sent to the most recently used TV (§7). There is no Power key: it toggles, so it could
+switch off a TV you meant to turn on.
 
 ## 5. Text entry
 
@@ -153,6 +155,17 @@ properties is reported as "not a TV" and is not persisted.
   are still perfectly good. Every device command therefore reconnects once if adb says the
   device is not there, and retries. Only a connection failure is retried: a command the device
   received and refused is never sent twice.
+- **Waking a sleeping TV.** In standby the TV closes every port, so nothing over adb can reach
+  it. It needs networked standby (on TCL: energy mode *Optimised – networked standby*), which
+  keeps its network card listening for a Wake-on-LAN magic packet. The packet needs the TV's
+  MAC, and this machine can only learn that while the TV is awake: it is read from this
+  machine's own ARP table after a successful command and kept in the registry. The browser
+  never supplies a MAC or an address - Wake always targets the most recently used TV.
+- **Quick launch wakes first.** A press checks whether the TV's adb port answers. If it does,
+  the app launches as before. If not, it sends Wake-on-LAN, pauses 3 s, keeps checking for up
+  to 10 s more until the port answers, then launches. The check is a TCP connect to the adb
+  port, not ICMP: a TV in networked standby can answer ping while adb is down, and ping needs a
+  privilege the container drops. With no MAC learned yet it simply launches as before.
 - The registry is keyed by `host:port` with nickname, model and timestamps; only "Forget device"
   deletes an entry.
 - All state lives in `TVD_DATA_DIR` (default `/data`), directory `0700`, files `0600`,
@@ -184,6 +197,7 @@ JSON API (all `POST`, all JSON, fixed shape, size-capped):
 | `/api/join` | `{"candidate_id": "...", "pairing_code": "..."}` | device joined |
 | `/api/devices/add` | `{"host": "...", "port": "..."}` | device added by typed address |
 | `/api/pair` | `{"pair_address": "...", "pairing_code": "...", "host": "..."}` | paired, then connected |
+| `/api/wake` | `{}` | Wake-on-LAN sent to the last TV used |
 | `/api/devices/{id}/connect` | `{}` | connected |
 | `/api/devices/{id}/disconnect` | `{}` | disconnected |
 | `/api/devices/{id}/forget` | `{}` | forgotten |
@@ -229,6 +243,10 @@ Rules for every endpoint:
 - SSRF hygiene: targets must be IPv4 **RFC1918 only**; reject loopback, link-local, multicast,
   `0.0.0.0`, `169.254.169.254`; no hostnames; ports fixed to `5555`–`5557`; discovery capped to
   one `/24`.
+- Wake-on-LAN is the only other broadcast the server sends: a fixed 102-byte magic packet to UDP
+  port 9, built from a validated MAC, sent only to the last-used TV's own address and the
+  broadcast addresses of its `/24`. Nothing in it, and nothing about where it goes, comes from
+  the browser.
 - Device discovery never returns a candidate before the RFC1918/loopback guard has been applied.
 - Logs: structured JSON, one line per request; credentials and tokens redacted; user-entered text
   is never logged, only its length.
@@ -251,6 +269,11 @@ These are product decisions, not bugs; do not "fix" them by weakening the checks
   handles those itself. Injected text does not survive fields that reject synthesized input.
 - **Injected keys are dropped** by permission, payment, 2FA and `filterTouchesWhenObserved`
   screens. We do not attempt to evade that, and we do not offer a way to retry around it.
+- **Wake needs networked standby, and the dashboard on the TV's network.** Without networked
+  standby the TV's network card is off and hears nothing. The packet is a broadcast, so the
+  dashboard must share the TV's segment: bridged networking for a VM, host networking for
+  Docker. A unicast copy is also aimed at the TV's own address, which may get through from a
+  NATted host, but that is not something to rely on.
 - **Docker Desktop on macOS NATs the container**, so LAN broadcast discovery is unreliable there.
   Unicast sweep and manual entry are the fallback. On Linux hosts prefer `--network=host` so
   mDNS/broadcast works.

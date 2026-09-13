@@ -152,6 +152,12 @@ class Live(_Base):
         self.assertEqual(status, 200)
         self.assertIn(b"Create the dashboard password", page)
 
+    def test_01b_the_sign_in_form_does_not_prefill_a_username(self):
+        _, _, page = self.get("/login")
+        body = page.decode("utf-8")
+        self.assertIn("name=username", body)
+        self.assertNotIn('value="operator"', body)
+
     def test_02_static_assets_are_served(self):
         for path, kind in (
             ("/static/app.css", "text/css"),
@@ -635,6 +641,144 @@ class WithDevice(_Base):
         self.assertEqual(self.body_json(body)["action"], "forgotten")
         with self.server.app.lock:
             self.assertIsNone(self.server.app.registry.get(self.device.id))
+
+
+    def test_97_wake_is_refused_until_the_mac_is_known(self):
+        from tvdashboard import wol
+
+        original = wol.lookup_mac
+        wol.lookup_mac = lambda host: ""
+        try:
+            csrf = self.sign_in()
+            status, _, body = self.post_json("/api/wake", {}, csrf=csrf)
+        finally:
+            wol.lookup_mac = original
+        self.assertEqual(status, 409, body)
+        self.assertEqual(self.body_json(body)["error"], "no_mac")
+
+    def test_98_wake_goes_to_the_last_used_tv_and_ignores_anything_the_browser_adds(self):
+        from tvdashboard import wol
+
+        sent = []
+        original = wol.send
+        wol.send = lambda mac, host: sent.append((mac, host)) or 3
+        with self.server.app.lock:
+            self.server.app.registry.set_mac(self.device.id, "d0:65:b3:27:38:0b")
+        try:
+            csrf = self.sign_in()
+            status, _, body = self.post_json(
+                "/api/wake", {"mac": "ff:ff:ff:ff:ff:ff", "host": "8.8.8.8"}, csrf=csrf
+            )
+        finally:
+            wol.send = original
+        self.assertEqual(status, 200, body)
+        self.assertEqual(self.body_json(body)["action"], "wake_sent")
+        self.assertEqual(sent, [("d0:65:b3:27:38:0b", "192.168.1.5")])
+
+    def test_99_a_successful_key_press_learns_the_mac_exactly_once(self):
+        from tvdashboard import api as api_module
+        from tvdashboard import wol
+
+        lookups = []
+        original = wol.lookup_mac
+        wol.lookup_mac = lambda host: lookups.append(host) or "d0:65:b3:27:38:0b"
+        api_module._MAC_MISSES.clear()  # noqa: SLF001 - test isolation
+        try:
+            csrf = self.sign_in()
+            for _ in range(3):
+                status, _, body = self.post_json("/api/key", {"key": "home"}, csrf=csrf)
+                self.assertEqual(status, 200, body)
+        finally:
+            wol.lookup_mac = original
+        self.assertEqual(lookups, ["192.168.1.5"])
+        with self.server.app.lock:
+            self.assertEqual(self.server.app.registry.get(self.device.id).mac, "d0:65:b3:27:38:0b")
+
+    def test_99b_wake_needs_a_csrf_token(self):
+        self.sign_in()
+        status, _, body = self.post_json("/api/wake", {})
+        self.assertEqual(status, 403)
+        self.assertEqual(self.body_json(body)["error"], "bad_csrf")
+
+    def test_99c_the_remote_has_sleep_and_wake_and_no_power(self):
+        self.sign_in()
+        _, _, page = self.get("/")
+        body = page.decode("utf-8")
+        self.assertIn('formaction="/api/wake"', body)
+        self.assertIn('value="sleep"', body)
+        self.assertNotIn('value="power"', body)
+
+
+    def _patch_wake(self, awake_answers, mac="d0:65:b3:27:38:0b"):
+        """Drive the quick-launch wake path with no network and no real waiting.
+
+        Records every probe, send and pause in order, so a test can assert the sequence.
+        """
+        from tvdashboard import api as api_module
+        from tvdashboard import wol
+
+        calls = []
+        answers = list(awake_answers)
+        saved = (wol.is_awake, wol.send, wol.lookup_mac, api_module._sleep)
+
+        def is_awake(host, port, timeout=1.0):
+            calls.append(("probe", host, port))
+            return answers.pop(0) if answers else True
+
+        wol.is_awake = is_awake
+        wol.send = lambda m, h: calls.append(("send", m, h)) or 3
+        wol.lookup_mac = lambda host: ""
+        api_module._sleep = lambda seconds: calls.append(("sleep", seconds))
+
+        def restore():
+            wol.is_awake, wol.send, wol.lookup_mac, api_module._sleep = saved
+
+        self.addCleanup(restore)
+        if mac:
+            with self.server.app.lock:
+                self.server.app.registry.set_mac(self.device.id, mac)
+        return calls
+
+    def _quick_launch(self):
+        csrf = self.sign_in()
+        return self.post_json("/api/quick_launch", {"platform": "netflix"}, csrf=csrf)
+
+    def test_99d_quick_launch_on_an_awake_tv_just_launches(self):
+        calls = self._patch_wake([True])
+        status, _, body = self._quick_launch()
+        self.assertEqual(status, 200, body)
+        self.assertFalse(self.body_json(body)["woke"])
+        self.assertEqual([call[0] for call in calls], ["probe"])
+
+    def test_99e_quick_launch_on_a_sleeping_tv_wakes_pauses_then_launches(self):
+        calls = self._patch_wake([False, True])
+        status, _, body = self._quick_launch()
+        self.assertEqual(status, 200, body)
+        self.assertTrue(self.body_json(body)["woke"])
+        self.assertEqual(
+            calls,
+            [
+                ("probe", "192.168.1.5", 5555),
+                ("send", "d0:65:b3:27:38:0b", "192.168.1.5"),
+                ("sleep", 3.0),
+                ("probe", "192.168.1.5", 5555),
+            ],
+        )
+
+    def test_99f_a_tv_slower_than_the_pause_is_waited_for_rather_than_failed(self):
+        calls = self._patch_wake([False, False, False, True])
+        status, _, body = self._quick_launch()
+        self.assertEqual(status, 200, body)
+        pauses = [call[1] for call in calls if call[0] == "sleep"]
+        self.assertEqual(pauses[0], 3.0)
+        self.assertGreater(len(pauses), 1, "stopped waiting at the 3 s pause")
+
+    def test_99g_a_sleeping_tv_with_no_learned_mac_still_launches_as_before(self):
+        calls = self._patch_wake([False], mac="")
+        status, _, body = self._quick_launch()
+        self.assertEqual(status, 200, body)
+        self.assertFalse(self.body_json(body)["woke"])
+        self.assertNotIn("send", [call[0] for call in calls])
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):

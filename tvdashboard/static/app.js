@@ -113,7 +113,9 @@
     bad_platform: "That app is not in the quick-launch list.",
     connect_failed: "Could not connect to the TV.",
     pairing_failed: "The TV rejected that pairing code.",
-    offline: "The dashboard is unreachable."
+    offline: "The dashboard is unreachable.",
+    no_mac: "Wake doesn't know this TV's network address yet. Press any button while the TV is on; if this keeps happening, the dashboard isn't on the TV's local network (a VM needs bridged networking).",
+    wake_failed: "Could not send the wake signal from this machine."
   };
 
   function sendKey(alias) {
@@ -198,7 +200,11 @@
   document.addEventListener("submit", function (event) {
     var form = event.target;
     if (!form || form.method.toLowerCase() !== "post") return;
-    var action = form.getAttribute("action") || "";
+    /* A button can send its form somewhere else - Wake posts the remote's form to /api/wake -
+       and the browser honours that without this file, so this file has to honour it too. */
+    var submitter = event.submitter;
+    var action =
+      (submitter && submitter.getAttribute("formaction")) || form.getAttribute("action") || "";
     if (action.indexOf("/api/") !== 0) return;
     if (NATIVE_FORMS[action]) return;
 
@@ -215,11 +221,13 @@
       if (name !== "csrf") body[name] = value;
     });
     /* The submit button's own name/value is not in FormData for a programmatic submit. */
-    var submitter = event.submitter;
     if (submitter && submitter.name) body[submitter.name] = submitter.value;
 
+    /* Quick launch may wake the TV first, which takes a few seconds: say so straight away
+       rather than leaving the status line still for the whole wait. */
+    if (action === "/api/quick_launch") say("Launching " + (body.platform || "app") + "...", false);
     post(action, body).then(function (payload) {
-      if (!report(payload, doneMessage(action, body))) return;
+      if (!report(payload, doneMessage(action, body, payload))) return;
       if (action === "/api/prefs/quick_launch") {
         flipChoice(form);
         return;
@@ -228,8 +236,12 @@
     });
   });
 
-  function doneMessage(action, body) {
-    if (action === "/api/quick_launch") return "Launched " + (body.platform || "app");
+  function doneMessage(action, body, payload) {
+    if (action === "/api/quick_launch") {
+      var name = (payload && payload.label) || body.platform || "app";
+      return (payload && payload.woke ? "Woke the TV and launched " : "Launched ") + name;
+    }
+    if (action === "/api/wake") return "Wake sent - the TV takes a few seconds";
     if (action === "/api/prefs/quick_launch") return "Saved";
     return "Done";
   }

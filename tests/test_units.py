@@ -3,12 +3,13 @@ the RFC1918/loopback guard, candidate dedupe, and the quick-launch catalogue."""
 
 from __future__ import annotations
 
+import json
 import pathlib
 import re
 import tempfile
 import unittest
 
-from tvdashboard import adb, api, keys, netguard, platforms, prefs, registry, textentry, views
+from tvdashboard import adb, api, keys, netguard, platforms, prefs, registry, textentry, views, wol
 from tvdashboard.config import DEFAULT_ALLOWED_CIDRS, DEVICE_PORTS, Config
 
 
@@ -35,8 +36,15 @@ class KeycodeMap(unittest.TestCase):
                 keys.resolve_key(bad)
 
     def test_destructive_keys_carry_a_confirmation(self):
-        # Power is the one key that affects everyone in the room, so it asks first.
-        self.assertTrue(keys.KEY_ALIASES["power"].is_destructive)
+        # Sleep switches the TV off for everyone in the room, so it asks first.
+        self.assertTrue(keys.KEY_ALIASES["sleep"].is_destructive)
+
+    def test_power_is_gone_and_wake_is_not_a_keycode(self):
+        # Power toggles, so it could turn off a TV you meant to turn on. Wake is a network
+        # packet, not a key, so it must not exist in the key map at all.
+        self.assertNotIn("power", keys.KEY_ALIASES)
+        self.assertNotIn("wake", keys.KEY_ALIASES)
+        self.assertEqual(keys.KEY_ALIASES["sleep"].keycode, "KEYCODE_SLEEP")
 
     def test_escape_is_the_back_key(self):
         # design.md §4: Esc is Back, the way it is on a remote. Shift+Esc releases the panel,
@@ -161,6 +169,118 @@ class CandidateCache(unittest.TestCase):
         ids = {registry.new_device_id() for _ in range(200)}
         self.assertEqual(len(ids), 200)
         self.assertTrue(all(len(item) == 32 for item in ids))
+
+
+class WakeOnLan(unittest.TestCase):
+    MAC = "d0:65:b3:27:38:0b"
+
+    def test_a_mac_is_canonicalized_from_the_forms_tools_print(self):
+        for raw in ("D0:65:B3:27:38:0B", "d0-65-b3-27-38-0b", "d065b327380b", "d0:65:b3:27:38:b"):
+            self.assertEqual(netguard.normalize_mac(raw), self.MAC, raw)
+
+    def test_a_mac_a_packet_must_not_be_built_from_is_refused(self):
+        for bad in (
+            "", "00:00:00:00:00:00", "ff:ff:ff:ff:ff:ff", "01:00:5e:00:00:01",
+            "d0:65:b3:27:38", "d0:65:b3:27:38:0b:aa", "zz:65:b3:27:38:0b",
+            "d0:65-b3:27:38:0b", "(incomplete)", None, 42,
+        ):
+            self.assertEqual(netguard.normalize_mac(bad), "", repr(bad))
+
+    def test_the_magic_packet_has_the_standard_shape(self):
+        packet = wol.magic_packet(self.MAC)
+        self.assertEqual(len(packet), 102)
+        self.assertEqual(packet[:6], b"\xff" * 6)
+        self.assertEqual(packet[6:], bytes.fromhex("d065b327380b") * 16)
+        with self.assertRaises(ValueError):
+            wol.magic_packet("ff:ff:ff:ff:ff:ff")
+
+    def test_it_is_aimed_only_at_the_device_and_its_own_network(self):
+        self.assertEqual(
+            wol.destinations("192.168.12.42"),
+            ("192.168.12.42", "192.168.12.255", "255.255.255.255"),
+        )
+        for bad in ("8.8.8.8", "127.0.0.1", "169.254.169.254", "not-an-ip", ""):
+            self.assertEqual(wol.destinations(bad), (), bad)
+
+    def test_the_mac_is_read_from_a_linux_arp_table(self):
+        table = (
+            "IP address       HW type     Flags       HW address            Mask     Device\n"
+            "192.168.12.1     0x1         0x2         aa:bb:cc:dd:ee:02     *        eth0\n"
+            "192.168.12.42    0x1         0x2         d0:65:b3:27:38:0b     *        eth0\n"
+            "192.168.12.99    0x1         0x0         00:00:00:00:00:00     *        eth0\n"
+        )
+        self.assertEqual(wol.parse_proc_arp(table, "192.168.12.42"), self.MAC)
+        # An unresolved entry, or an address with no entry at all, yields nothing.
+        self.assertEqual(wol.parse_proc_arp(table, "192.168.12.99"), "")
+        self.assertEqual(wol.parse_proc_arp(table, "192.168.12.7"), "")
+
+    def test_the_router_is_never_mistaken_for_the_tv(self):
+        table = (
+            "IP address       HW type     Flags       HW address            Mask     Device\n"
+            "192.168.12.1     0x1         0x2         aa:bb:cc:dd:ee:02     *        eth0\n"
+        )
+        self.assertEqual(wol.parse_proc_arp(table, "192.168.12.42"), "")
+
+    def test_the_mac_is_read_from_ip_neigh_and_from_macos_arp(self):
+        self.assertEqual(
+            wol.parse_ip_neigh("192.168.12.42 dev eth0 lladdr d0:65:b3:27:38:0b STALE\n", "192.168.12.42"),
+            self.MAC,
+        )
+        self.assertEqual(wol.parse_ip_neigh("192.168.12.42 dev eth0 FAILED\n", "192.168.12.42"), "")
+        # macOS drops an octet's leading zero.
+        self.assertEqual(
+            wol.parse_bsd_arp("? (192.168.12.42) at d0:65:b3:27:38:b on en0 ifscope [ethernet]\n", "192.168.12.42"),
+            self.MAC,
+        )
+        self.assertEqual(
+            wol.parse_bsd_arp("? (192.168.12.42) at (incomplete) on en0 ifscope [ethernet]\n", "192.168.12.42"),
+            "",
+        )
+
+    def test_the_awake_check_only_ever_connects_to_a_private_address(self):
+        attempts = []
+        original = wol.socket.create_connection
+        wol.socket.create_connection = lambda addr, timeout=None: attempts.append(addr) or _FakeConnection()
+        try:
+            for bad in ("8.8.8.8", "127.0.0.1", "169.254.169.254", "", "tv.local"):
+                self.assertFalse(wol.is_awake(bad, 5555), bad)
+            self.assertFalse(wol.is_awake("192.168.12.42", 0))
+            self.assertFalse(wol.is_awake("192.168.12.42", True))
+            self.assertEqual(attempts, [], "a refused address was still connected to")
+            self.assertTrue(wol.is_awake("192.168.12.42", 5555))
+            self.assertEqual(attempts, [("192.168.12.42", 5555)])
+        finally:
+            wol.socket.create_connection = original
+
+    def test_a_tv_whose_adb_port_does_not_answer_is_asleep(self):
+        def refuse(addr, timeout=None):
+            raise ConnectionRefusedError()
+
+        original = wol.socket.create_connection
+        wol.socket.create_connection = refuse
+        try:
+            self.assertFalse(wol.is_awake("192.168.12.42", 5555))
+        finally:
+            wol.socket.create_connection = original
+
+    def test_a_learned_mac_survives_a_reload(self):
+        config = _config()
+        reg = registry.Registry(config, devices={}, candidates={})
+        device = reg.add("192.168.1.5:5555", model="TV")
+        self.assertTrue(reg.set_mac(device.id, "D0-65-B3-27-38-0B"))
+        self.assertEqual(registry.Registry.load(config).get(device.id).mac, self.MAC)
+
+    def test_a_registry_file_from_before_wake_existed_still_loads(self):
+        config = _config()
+        reg = registry.Registry(config, devices={}, candidates={})
+        device = reg.add("192.168.1.5:5555", model="TV")
+        path = pathlib.Path(config.data_dir) / registry.REGISTRY_FILE
+        payload = json.loads(path.read_text())
+        payload["devices"][device.id].pop("mac", None)
+        path.write_text(json.dumps(payload))
+        reloaded = registry.Registry.load(config).get(device.id)
+        self.assertIsNotNone(reloaded)
+        self.assertEqual(reloaded.mac, "")
 
 
 class QuickLaunchLogos(unittest.TestCase):
@@ -307,6 +427,16 @@ class LoginNotices(unittest.TestCase):
         for code, (tone, message) in views.LOGIN_NOTICES.items():
             self.assertIn(tone, {"error", "info"})
             self.assertTrue(message and "<" not in message, code)
+
+
+class _FakeConnection:
+    """Stands in for a socket from `create_connection` in a `with` block."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
 
 
 if __name__ == "__main__":
