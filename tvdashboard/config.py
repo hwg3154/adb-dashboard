@@ -11,6 +11,11 @@ DEFAULT_DATA_DIR = "/data"
 DEFAULT_HTTP_ADDR = "0.0.0.0:8080"
 DEFAULT_ADB_BIN = "adb"
 
+#: A key shorter than this is treated as absent: a weak bearer secret is worse than no door,
+#: because it invites guessing rather than stopping it. 16 is a floor, not a target; the
+#: documented value is 32+ random characters.
+API_KEY_MIN_CHARS = 16
+
 DEFAULT_ALLOWED_CIDRS: tuple[str, ...] = (
     "10.0.0.0/8",
     "172.16.0.0/12",
@@ -65,6 +70,8 @@ class Config:
     allowed_cidrs: tuple[str, ...] = DEFAULT_ALLOWED_CIDRS
     mdns_enabled: bool = False
     adb_bin: str = DEFAULT_ADB_BIN
+    #: Shared-secret bearer key for the scriptable API. Empty = the API is not enabled.
+    api_key: str = ""
     device_ports: tuple[int, ...] = DEVICE_PORTS
     max_text_chars: int = MAX_TEXT_CHARS
     max_screenshot_bytes: int = MAX_SCREENSHOT_BYTES
@@ -119,6 +126,23 @@ class Config:
         def flag(name: str) -> bool:
             return (source.get(name) or "").strip().lower() in {"1", "true", "yes", "on"}
 
+        def api_key() -> str:
+            # `text()` already strips the edges and refuses control characters; the length floor
+            # is the real gate. A bearer token is one token, so any internal whitespace means it
+            # is not the key the operator typed - refuse it rather than carry a newline in it.
+            raw = text("TVD_API_KEY", "")
+            if not raw:
+                return ""
+            if any(char.isspace() for char in raw):
+                return ""
+            if len(raw) < API_KEY_MIN_CHARS:
+                warnings.append(
+                    f"TVD_API_KEY is {len(raw)} characters; {API_KEY_MIN_CHARS}+ are required, "
+                    "so the scriptable API stays disabled"
+                )
+                return ""
+            return raw
+
         def cidrs() -> tuple[str, ...]:
             raw = (source.get("TVD_ALLOWED_CIDRS") or "").strip()
             if not raw:
@@ -172,6 +196,7 @@ class Config:
             allowed_cidrs=cidrs(),
             mdns_enabled=flag("TVD_MDNS"),
             adb_bin=_safe_binary(text("TVD_ADB_BIN", DEFAULT_ADB_BIN)),
+            api_key=api_key(),
             device_ports=ports(),
             max_text_chars=integer("TVD_MAX_TEXT_CHARS", MAX_TEXT_CHARS, 16, 2048),
             max_screenshot_bytes=integer("TVD_MAX_SCREENSHOT_BYTES", MAX_SCREENSHOT_BYTES, 65_536, 16 * 1024 * 1024),

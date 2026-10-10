@@ -82,8 +82,40 @@ Environment only; there are no command-line options.
 | `TVD_ALLOWED_CIDRS` | RFC1918 | comma-separated discovery/connect scope |
 | `TVD_DEVICE_PORTS` | `5555,5556,5557` | adb ports to sweep |
 | `TVD_ADB_BIN` | `adb` | adb binary |
+| `TVD_API_KEY` | unset | bearer key enabling the scriptable API (below); empty = off |
 
 Full table, including the tuning knobs, in [docs/design.md](docs/design.md) §11.
+
+## Scriptable API
+
+The dashboard can be driven without a browser, which is how a script, an n8n workflow, or a chat
+assistant is meant to use it. Set `TVD_API_KEY` (16+ random characters) and every JSON endpoint
+accepts a `Bearer` token instead of the session cookie:
+
+```bash
+KEY=<your key>
+curl -s -H "Authorization: Bearer $KEY" -d '{}'      http://<host>:8080/api/status
+curl -s -H "Authorization: Bearer $KEY" -d '{}'      http://<host>:8080/api/wake
+curl -s -H "Authorization: Bearer $KEY" -d '{"platform":"netflix"}'  http://<host>:8080/api/quick_launch
+curl -s -H "Authorization: Bearer $KEY" -d '{"key":"dpad_center"}'   http://<host>:8080/api/key
+curl -s -H "Authorization: Bearer $KEY" -d '{"text":"hello","submit":"1"}' http://<host>:8080/api/text
+```
+
+A valid key needs no cookie, CSRF token, or `Origin` header - the key is the identity. It opens
+the whole endpoint table in [docs/design.md](docs/design.md) §8, plus `/api/status`, a read-only
+endpoint reporting the registered devices, the active one, and whether its adb port answers. With
+`TVD_API_KEY` unset the token path does not exist and the browser flow is byte-for-byte unchanged.
+
+Generate a key and drop it in the compose `.env` (never commit the filled-in file):
+
+```bash
+openssl rand -hex 32          # -> put the result in .env as TVD_API_KEY=...
+cp .env.example .env
+docker compose up -d --build
+```
+
+The key is a LAN credential on the same standing as the operator password: whoever holds it can do
+anything the dashboard can, so treat it accordingly.
 
 ## Tests
 

@@ -466,6 +466,12 @@ def serve(config: Config) -> int:
     if not app.is_initialized:
         sys.stderr.write("tvdashboard: no account yet - open /login to create one\n")
 
+    if app.config.api_key:
+        sys.stderr.write(
+            "tvdashboard: scriptable API enabled - POST with `Authorization: Bearer <TVD_API_KEY>` "
+            "and no cookie, CSRF or Origin (see docs/design.md §8.2)\n"
+        )
+
     sys.stderr.write(f"tvdashboard: listening on http://{config.listen_host}:{config.listen_port}\n")
     sys.stderr.flush()
     try:

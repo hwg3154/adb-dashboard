@@ -228,6 +228,40 @@ Rules for every endpoint:
 - live mirroring: needs `ffmpeg` or WebRTC, and turns the appliance into a video server.
 - `input tap` / `swipe`: layout-dependent; keys from a fixed map are the reliable remote.
 
+## 8.2 Scriptable API
+
+The same JSON endpoints can be called by a script, an automation node, or an agent, without a
+browser. That path is off by default and switches on with one environment variable:
+
+- `TVD_API_KEY` set (16+ characters) enables it; empty or short means the API does not exist at
+  all, and every request still needs the session cookie exactly as before.
+- A caller authenticates with `Authorization: Bearer <key>` on a `POST`. A valid key is a full
+  identity: no session cookie, no CSRF token, no `Origin` header. The `Host` header is still
+  checked, and the key is compared in constant time.
+- The key opens the same surface the browser has - every endpoint in the §8 table works - plus
+  one read-only endpoint that has no browser counterpart:
+
+| Endpoint | Body | Result |
+|---|---|---|
+| `/api/status` | `{}` | registered devices, which one is active and whether its adb port answers, enabled quick-launch aliases |
+
+So the everyday verbs are:
+
+```bash
+KEY=<TVD_API_KEY>; B='http://<host>:8080'
+curl -s -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d '{}'        $B/api/status
+curl -s -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d '{}'        $B/api/wake
+curl -s -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d '{}'        $B/api/key    # {"key":"dpad_center"}
+curl -s -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d '{}'        $B/api/text   # {"text":"...","submit":"1"}
+curl -s -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d '{}'        $B/api/quick_launch  # {"platform":"netflix"}
+```
+
+The key is shared-secret, not per-client: anyone who has it can do anything the operator can,
+including pair and forget devices. It is therefore a LAN credential on the same standing as the
+operator password, and the same rules as §9 apply to it - it is never logged, never returned in a
+response, and the login rate limiter does not apply to it (the key path is not a guessable
+password). Per-press key budgeting still applies, so a stuck loop cannot hammer the device.
+
 ## 9. Security requirements
 
 - Argon2id password hashing (`argon2-cffi` when present), falling back to `hashlib.scrypt`.
@@ -235,6 +269,9 @@ Rules for every endpoint:
   (an unknown username is verified against a decoy hash generated in the same scheme).
 - Server-side sessions: 256-bit random token, stored **hashed**; cookie `HttpOnly` + `SameSite=Lax`,
   path-scoped; idle + absolute expiry; logout revokes. `Secure` only when TLS is terminated in front.
+  A second, opt-in identity is the `TVD_API_KEY` bearer token (§8.2): constant-time compared,
+  never logged or echoed, and the only path that reaches a device command without a session; when
+  the key is unset the check is a no-op and the cookie path is unchanged.
 - Origin validated against the request's own `Host` (a wildcard listener answers on every LAN
   address, so a single configured origin cannot be the reference); `Sec-Fetch-Site` refuses
   `cross-site`; an opaque `Origin: null` is refused. CSRF token on every form
@@ -290,6 +327,7 @@ These are product decisions, not bugs; do not "fix" them by weakening the checks
 | `TVD_ALLOWED_CIDRS` | RFC1918 | comma-separated discovery/connect scope |
 | `TVD_MDNS` | unset | `1` = add best-effort mDNS to discovery |
 | `TVD_ADB_BIN` | `adb` | adb binary path |
+| `TVD_API_KEY` | unset | bearer key enabling the scriptable API (§8.2); empty = disabled |
 
 ## 12. Testing
 

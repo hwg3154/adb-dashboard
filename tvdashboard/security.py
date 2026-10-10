@@ -12,6 +12,7 @@ Everything else in the app is a consumer of these decisions and must not re-impl
 from __future__ import annotations
 
 import html
+import hmac
 import ipaddress
 import json
 import re
@@ -235,11 +236,45 @@ def authorize(app: "object", request: Request) -> str:
     return store.authorize(token)
 
 
+def is_api_key(app: "object", request: Request) -> bool:
+    """True when the request carries the configured API key as a bearer token.
+
+    The key is set with `TVD_API_KEY`; when it is empty the scriptable API is off and this is
+    always False. The comparison is constant-time so a wrong key is not faster than a right one.
+    A valid API key is a full identity for the scriptable API - it needs no session cookie, no
+    CSRF token, and no browser Origin, which is why `check_write_headers` defers to it.
+    """
+    config = getattr(app, "config", None)
+    expected = getattr(config, "api_key", "") if config is not None else ""
+    if not isinstance(expected, str) or not expected:
+        return False
+    supplied = _bearer_token(request)
+    if not supplied:
+        return False
+    return hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8"))
+
+
+def _bearer_token(request: Request) -> str:
+    """The token from an `Authorization: Bearer <token>` header, or '' when absent or odd."""
+    raw = request.headers.get("authorization", "")
+    if not isinstance(raw, str) or not raw:
+        return ""
+    scheme, _, token = raw.strip().partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        return ""
+    return token.strip()[:_MAX_HEADER_VALUE_CHARS]
+
+
 def check_write_headers(app: "object", request: Request, csrf: str = "") -> None:
     """Guard a state-changing request: method, Host, Origin, Sec-Fetch-Site, CSRF.
 
     Raises `RequestRejected` with a stable code. `csrf` is unused when the caller does not
     require a form token, in which case Origin + session are the gate.
+
+    When the request authenticated with the API key (`api_key`), the browser-origin checks
+    (Origin, Sec-Fetch-Site, CSRF) are skipped: a script is not a cross-site browser, so
+    there is no page to compare against. The Host check and the API key itself remain the
+    gate. This is the only path that reaches a device command without a session cookie.
     """
     if request.method not in _UNSAFE_METHODS:
         raise RequestRejected("bad_request")
@@ -248,9 +283,15 @@ def check_write_headers(app: "object", request: Request, csrf: str = "") -> None
     if not host or not _ORIGIN_RE.match(host):
         raise RequestRejected("bad_request")
 
+    if is_api_key(app, request):
+        # Token-authenticated path: the bearer key replaces Origin + CSRF. A Host that is not
+        # ours is still refused above, so a cross-site page cannot replay a key it captured -
+        # it would first have had to reach this server's own Host.
+        return
+
     # A browser sends the literal string "null" for an opaque origin, and also for a form
-    # navigation under some referrer policies. It names no origin at all, so treating it as a
-    # mismatch locks out a legitimate page; treat it as absent and let Sec-Fetch-Site decide,
+    # navigation under some referrer policies. It names no origin at all, so treating it as
+    # a mismatch locks out a legitimate page; treat it as absent and let Sec-Fetch-Site decide,
     # which is the header that can actually distinguish our own page from someone else's.
     origin = request.headers.get("origin", "")
     if origin and origin != "null":
@@ -407,6 +448,7 @@ __all__ = [
     "check_write_headers",
     "clean_token",
     "client_address",
+    "is_api_key",
     "is_token",
     "origin_of",
     "parse_json_body",

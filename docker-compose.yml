@@ -10,6 +10,9 @@ services:
       TVD_HTTP_ADDR: "0.0.0.0:8080"
       # No TLS in front of it, so say so once instead of warning on every page.
       TVD_ALLOW_INSECURE_HTTP: "1"
+      # Scriptable API: set TVD_API_KEY in the .env next to this file (or export it) to
+      # enable `Authorization: Bearer <key>` calls with no cookie/CSRF/Origin. Empty = off.
+      TVD_API_KEY: "${TVD_API_KEY:-}"
     volumes:
       - tvd-data:/data                  # accounts, sessions, device registry
       - tvd-adbkey:/home/tvd/.android   # adb RSA key - losing this re-prompts the TV

@@ -38,6 +38,7 @@ Browser dashboard for one Android TV over wireless adb. Configured by environmen
   TVD_ALLOWED_CIDRS        comma-separated discovery scope       [default RFC1918]
   TVD_DEVICE_PORTS         comma-separated adb ports             [default 5555,5556,5557]
   TVD_ADB_BIN              adb binary                            [default adb]
+  TVD_API_KEY              bearer key enabling the scriptable API [default disabled]
 
 See docs/design.md §11 for the full table.
 """

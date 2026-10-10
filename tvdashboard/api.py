@@ -3,14 +3,20 @@
 One function per endpoint, reached through a fixed table. Every handler:
 
 - runs only for `POST` (design.md §8: `GET` is for HTML)
-- passes through `security.check_write_headers`, which is where Origin, Host and CSRF are decided
+- authenticates with a session cookie **or** the `TVD_API_KEY` bearer token; when the key is
+  used, `security.check_write_headers` skips the browser-origin checks that exist to stop a
+  cross-site page (the key is the identity)
+- passes through `security.check_write_headers`, which is where Host and, for browser callers,
+  Origin and CSRF are decided
 - takes its arguments from an allowlist or a validator, never from a string the browser composed
 - returns a stable error code, never a device string and never the operator's own input
 
 The same handlers serve the plain `<form>` fallback and `fetch()`. A form gets a redirect back to
-the page it came from, a JSON caller gets JSON; nothing else differs.
+the page it came from, a JSON caller gets JSON; nothing else differs. A script authenticating
+with the API key never sends a form, so it never sees a redirect.
 
-See `docs/design.md` §8 for the endpoint table and §8.1 for what is deliberately absent.
+See `docs/design.md` §8 for the endpoint table, §8.2 for the scriptable API, and §8.1 for what
+is deliberately absent.
 """
 
 from __future__ import annotations
@@ -137,13 +143,18 @@ def handle(app: object, request: Request, ip: str = "") -> Result:
     if handler is None and device_action is None:
         return fail("not_found", 404)
 
-    # `/api/login` is the one endpoint reachable without a session, so it cannot carry a
-    # session-bound CSRF token. Origin and Host still have to check out.
-    needs_csrf = path != "/api/login"
     token = security.authorize(app, request)
+    #: A request that has no session but does carry the API key. It is its own identity, so it
+    #: needs no CSRF token - there is no browser page to bind it to.
+    with_key = token == "" and security.is_api_key(app, request)
+
+    # `/api/login` is the one endpoint reachable without an identity, so it cannot carry a
+    # session-bound CSRF token. Origin and Host still have to check out. A key-authenticated
+    # request needs no CSRF at all.
+    needs_csrf = path != "/api/login" and not with_key
     security.check_write_headers(app, request, csrf=token if needs_csrf else "")
 
-    if needs_csrf and not token:
+    if not token and not with_key and path != "/api/login":
         return _finish(request, path, fail("unauthorized", 401))
 
     if device_action is not None:
@@ -332,6 +343,32 @@ def _text(app: object, request: Request, token: str, ip: str) -> Result:
     return _adb(lambda: app.adb.send_text(target, raw, submit=request.flag("submit")), chars=len(raw))
 
 
+def _status(app: object, request: Request, token: str, ip: str) -> Result:
+    """Read-only snapshot of what the dashboard knows, for scripts and dashboards.
+
+    It changes nothing and touches the device at most to report whether the adb port is open.
+    The TV's host is not echoed back: it is the operator's own registry, and a status read must
+    not become a way to read an address out of the appliance.
+    """
+    devices = app.registry.list_public()
+    with app.lock:
+        active = app.registry.active_target()
+    host, _, port_text = active.rpartition(":")
+    awake = False
+    if host:
+        try:
+            awake = wol.is_awake(host, int(port_text), _AWAKE_PROBE_SECONDS)
+        except (TypeError, ValueError):
+            awake = False
+    return ok(
+        api="scriptable",
+        devices=devices,
+        count=len(devices),
+        active={"target": bool(active), "awake": awake},
+        quick_launch=list(app.prefs.quick_launch),
+    )
+
+
 def _screenshot(app: object, request: Request, token: str, ip: str) -> Result:
     target = _target(app)
     if not target:
@@ -356,7 +393,6 @@ def _screenshot(app: object, request: Request, token: str, ip: str) -> Result:
 
 
 # ------------------------------------------------------------------------------------ apps
-
 
 def _apps(app: object, request: Request, token: str, ip: str) -> Result:
     target = _target(app)
@@ -799,6 +835,7 @@ _ROUTES: dict[str, Callable[[object, Request, str, str], Result]] = {
     "/api/change_password": _change_password,
     "/api/key": _key,
     "/api/wake": _wake,
+    "/api/status": _status,
     "/api/text": _text,
     "/api/screenshot": _screenshot,
     "/api/apps": _apps,
